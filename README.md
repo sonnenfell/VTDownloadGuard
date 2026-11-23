@@ -32,7 +32,7 @@ It runs quietly in the background with almost zero idle CPU usage, sorts pending
 
 Use this option on any 64-bit Windows 10 or Windows 11 PC. No extra runtime or SDK is required.
 
-1. Go to the **Releases** page on GitHub and download `VTDownloadGuard-1.2.0-win-x64-Setup.exe`.
+1. Go to the **Releases** page on GitHub and download `VTDownloadGuard-1.2.1-win-x64-Setup.exe`.
 2. Double-click the installer and follow the setup steps.
 3. Keep **Start automatically minimized to the system tray when Windows starts** checked if you want background protection on every login.
 4. Click **Finish** to launch VTDownloadGuard.
@@ -41,7 +41,7 @@ Use this option on any 64-bit Windows 10 or Windows 11 PC. No extra runtime or S
 
 Use this option if you already have the **.NET 10 Desktop Runtime (x64)** installed and want a tiny portable folder (under 1 MB).
 
-1. Download `VTDownloadGuard-1.2.0-win-x64-Portable-FrameworkDependent.zip` from the **Releases** page.
+1. Download `VTDownloadGuard-1.2.1-win-x64-Portable-FrameworkDependent.zip` from the **Releases** page.
 2. Extract the zip to a folder of your choice (for example, `C:\Program Files\VTDownloadGuard` or `%LocalAppData%\VTDownloadGuard`).
 3. Run `VTDownloadGuard.exe --open` to open the dashboard on first launch.
 

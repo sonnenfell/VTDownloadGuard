@@ -71,6 +71,7 @@ internal static class Program
             ("ModernThresholdSlider guidance, colors, and clean text", TestThresholdSlider),
             ("UpdateService version comparison, critical marker, auto-policy, and GitHub API", TestUpdateServiceLogic),
             ("Self-update SHA-256 verification, zip staging, backup, and data preservation", TestSelfUpdateDataPreservation),
+            ("AppSettings reset to defaults and VirusTotal free-API limit warnings", TestResetDefaultsAndVtLimitWarnings),
             ("DashboardForm, OnboardingDialog, and TutorialSession UI smoke test", TestDashboardUiSmoke)
         };
 
@@ -1412,6 +1413,96 @@ internal static class Program
         }
     }
 
+    private static Task TestResetDefaultsAndVtLimitWarnings()
+    {
+        var defaults = AppSettings.CreateDefault();
+        var s = AppSettings.CreateDefault();
+
+        SettingsStore.SetApiKey(s, "vt-keep-me");
+        SettingsStore.SetMetaDefenderApiKey(s, "md-keep-me");
+        SettingsStore.SetMalwareBazaarApiKey(s, "mb-keep-me");
+        s.WatchedDirectories = [new WatchedDirectory { Path = @"C:\CustomDir", IncludeSubdirectories = true, Enabled = true }];
+        s.OnboardingCompleted = true;
+        s.UpdateRepository = "sonnenfell/VTDownloadGuard";
+
+        s.ThemeMode = AppThemeMode.Light;
+        s.StartWithWindows = false;
+        s.UploadPolicy = UploadPolicy.HashLookupOnly;
+        s.FilterMode = FileFilterMode.AllFiles;
+        s.UploadExtensions = [".bin"];
+        s.ArchiveExtensions = [".tar"];
+        s.MaliciousThreshold = 7;
+        s.MaxRequestsPerMinute = 30;
+        s.MaxUploadSizeMb = 200;
+        s.MaxHashSizeMb = 4096;
+        s.SecondaryLookupsLowerRiskOnly = true;
+        s.EnableCirclHashlookup = false;
+        s.EnableMetaDefender = true;
+        s.EnableMalwareBazaar = true;
+        s.AutoUpdateEnabled = true;
+        s.AutoUpdateCriticalOnly = true;
+
+        s.ResetPreferencesToDefaults();
+
+        Assert(s.ThemeMode == defaults.ThemeMode, "ThemeMode must reset to default.");
+        Assert(s.StartWithWindows == defaults.StartWithWindows, "StartWithWindows must reset to default.");
+        Assert(s.UploadPolicy == defaults.UploadPolicy, "UploadPolicy must reset to default.");
+        Assert(s.FilterMode == defaults.FilterMode, "FilterMode must reset to default.");
+        Assert(s.UploadExtensions.SequenceEqual(defaults.UploadExtensions), "UploadExtensions must reset to default.");
+        Assert(s.ArchiveExtensions.SequenceEqual(defaults.ArchiveExtensions), "ArchiveExtensions must reset to default.");
+        Assert(s.MaliciousThreshold == defaults.MaliciousThreshold, "MaliciousThreshold must reset to default.");
+        Assert(s.MaxRequestsPerMinute == defaults.MaxRequestsPerMinute, "MaxRequestsPerMinute must reset to default.");
+        Assert(s.MaxUploadSizeMb == defaults.MaxUploadSizeMb, "MaxUploadSizeMb must reset to default.");
+        Assert(s.MaxHashSizeMb == defaults.MaxHashSizeMb, "MaxHashSizeMb must reset to default.");
+        Assert(s.SecondaryLookupsLowerRiskOnly == defaults.SecondaryLookupsLowerRiskOnly, "SecondaryLookupsLowerRiskOnly must reset to default.");
+        Assert(s.EnableCirclHashlookup == defaults.EnableCirclHashlookup, "EnableCirclHashlookup must reset to default.");
+        Assert(s.EnableMetaDefender == defaults.EnableMetaDefender, "EnableMetaDefender must reset to default.");
+        Assert(s.EnableMalwareBazaar == defaults.EnableMalwareBazaar, "EnableMalwareBazaar must reset to default.");
+        Assert(s.AutoUpdateEnabled == defaults.AutoUpdateEnabled, "AutoUpdateEnabled must reset to default.");
+        Assert(s.AutoUpdateCriticalOnly == defaults.AutoUpdateCriticalOnly, "AutoUpdateCriticalOnly must reset to default.");
+
+        Assert(SettingsStore.GetDecryptedApiKey(s) == "vt-keep-me", "VT API key must be preserved on reset.");
+        Assert(SettingsStore.GetDecryptedMetaDefenderApiKey(s) == "md-keep-me", "MetaDefender key must be preserved on reset.");
+        Assert(SettingsStore.GetDecryptedMalwareBazaarApiKey(s) == "mb-keep-me", "MalwareBazaar key must be preserved on reset.");
+        Assert(s.WatchedDirectories.Count == 1 && s.WatchedDirectories[0].Path == @"C:\CustomDir", "Watched directories must be preserved on reset.");
+        Assert(s.OnboardingCompleted, "OnboardingCompleted must be preserved on reset.");
+
+        var atDefaults = DashboardForm.EvaluateVirusTotalLimitWarnings(4, 32, 2048);
+        Assert(atDefaults.RateLimitWarning.Length == 0, "Default rate limit (4) must not trigger warning.");
+        Assert(atDefaults.MaxUploadWarning.Length == 0, "Default upload limit (32 MB) must not trigger warning.");
+        Assert(!atDefaults.MaxHashIsWarning, "Default max hash size (2048 MB) must not trigger warning.");
+        Assert(!atDefaults.MaxHashWarning.Contains('\u2014') && !atDefaults.MaxHashWarning.Contains('\u2013'),
+            "Limit hint text must not contain Unicode em/en dashes.");
+
+        var withinUpload = DashboardForm.EvaluateVirusTotalLimitWarnings(4, 32, 512);
+        Assert(withinUpload.MaxHashWarning.Length == 0 && !withinUpload.MaxHashIsWarning,
+            "Max hash <= 650 MB should not show a notice.");
+
+        var overRate = DashboardForm.EvaluateVirusTotalLimitWarnings(5, 32, 2048);
+        Assert(overRate.RateLimitWarning.Contains("4 requests/minute", StringComparison.OrdinalIgnoreCase),
+            "Rate limit above 4 must warn about the free API limit.");
+        Assert(!overRate.RateLimitWarning.Contains('\u2014') && !overRate.RateLimitWarning.Contains('\u2013'),
+            "Rate limit warning must not contain Unicode em/en dashes.");
+
+        var overUpload = DashboardForm.EvaluateVirusTotalLimitWarnings(4, 33, 2048);
+        Assert(overUpload.MaxUploadWarning.Contains("32 MB", StringComparison.OrdinalIgnoreCase),
+            "Upload limit above 32 MB must warn about the free API direct upload limit.");
+        Assert(!overUpload.MaxUploadWarning.Contains('\u2014') && !overUpload.MaxUploadWarning.Contains('\u2013'),
+            "Upload limit warning must not contain Unicode em/en dashes.");
+
+        var unlimitedHash = DashboardForm.EvaluateVirusTotalLimitWarnings(4, 32, 0);
+        Assert(unlimitedHash.MaxHashIsWarning && unlimitedHash.MaxHashWarning.Contains("2048 MB", StringComparison.OrdinalIgnoreCase),
+            "Unlimited max hash (0) must warn.");
+        Assert(!unlimitedHash.MaxHashWarning.Contains('\u2014') && !unlimitedHash.MaxHashWarning.Contains('\u2013'),
+            "Max hash warning must not contain Unicode em/en dashes.");
+
+        var overHash = DashboardForm.EvaluateVirusTotalLimitWarnings(4, 32, 4096);
+        Assert(overHash.MaxHashIsWarning && overHash.MaxHashWarning.Contains("2048 MB", StringComparison.OrdinalIgnoreCase),
+            "Max hash above 2048 MB must warn.");
+
+        return Task.CompletedTask;
+    }
+
     private static Task TestDashboardUiSmoke()
     {
         string tempDir = CreateTempDir();
@@ -1454,7 +1545,16 @@ internal static class Program
                 using var icons = new TrayIconFactory();
 
                 using var form = new DashboardForm(engine, paths, logger, icons.AppIcon, updateSvc);
+                form.CreateControl();
                 form.PerformLayout();
+                var darkMetrics = form.GetHeaderLayoutMetricsForTest();
+                Assert(darkMetrics.HeaderBottom <= darkMetrics.NavTop,
+                    $"Header ({darkMetrics.HeaderBottom}) must not overlap nav tabs ({darkMetrics.NavTop}).");
+                Assert(darkMetrics.SubtitleBottom <= darkMetrics.HeaderHeight,
+                    $"Subtitle bottom ({darkMetrics.SubtitleBottom}) must stay within header ({darkMetrics.HeaderHeight}).");
+                Assert(darkMetrics.ScanBtnBottom <= darkMetrics.HeaderHeight,
+                    $"Header buttons ({darkMetrics.ScanBtnBottom}) must stay within header ({darkMetrics.HeaderHeight}).");
+
                 for (int tab = 0; tab < 5; tab++)
                 {
                     form.SelectTab(tab);
@@ -1485,6 +1585,16 @@ internal static class Program
                 settings.ThemeMode = AppThemeMode.Light;
                 engine.ApplySettings(settings);
                 using var formLight = new DashboardForm(engine, paths, logger, icons.AppIcon, updateSvc);
+                formLight.CreateControl();
+                formLight.PerformLayout();
+                var lightMetrics = formLight.GetHeaderLayoutMetricsForTest();
+                Assert(lightMetrics.HeaderBottom <= lightMetrics.NavTop,
+                    $"Light header ({lightMetrics.HeaderBottom}) must not overlap nav tabs ({lightMetrics.NavTop}).");
+                Assert(lightMetrics.SubtitleBottom <= lightMetrics.HeaderHeight,
+                    $"Light subtitle ({lightMetrics.SubtitleBottom}) must stay within header ({lightMetrics.HeaderHeight}).");
+                Assert(lightMetrics.ScanBtnBottom <= lightMetrics.HeaderHeight,
+                    $"Light header buttons ({lightMetrics.ScanBtnBottom}) must stay within header ({lightMetrics.HeaderHeight}).");
+
                 for (int tab = 0; tab < 5; tab++)
                 {
                     formLight.SelectTab(tab);

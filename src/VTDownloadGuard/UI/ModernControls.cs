@@ -228,6 +228,12 @@ public sealed class ModernNavBar : Control
         Invalidate();
     }
 
+    public override Size GetPreferredSize(Size proposedSize)
+    {
+        int textHeight = TextRenderer.MeasureText("Settings", Font).Height;
+        return new Size(Math.Max(200, proposedSize.Width), Math.Max(44, textHeight + 22));
+    }
+
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);

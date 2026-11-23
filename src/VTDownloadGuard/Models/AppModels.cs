@@ -421,6 +421,29 @@ public sealed class AppSettings
             UpdateRepository = UpdateRepository
         };
     }
+
+    public void ResetPreferencesToDefaults()
+    {
+        AppSettings defaults = CreateDefault();
+        ThemeMode = defaults.ThemeMode;
+        StartWithWindows = defaults.StartWithWindows;
+        AutoUpdateEnabled = defaults.AutoUpdateEnabled;
+        AutoUpdateCriticalOnly = defaults.AutoUpdateCriticalOnly;
+
+        UploadPolicy = defaults.UploadPolicy;
+        FilterMode = defaults.FilterMode;
+        UploadExtensions = [.. defaults.UploadExtensions];
+        ArchiveExtensions = [.. defaults.ArchiveExtensions];
+        MaliciousThreshold = defaults.MaliciousThreshold;
+        MaxRequestsPerMinute = defaults.MaxRequestsPerMinute;
+        MaxUploadSizeMb = defaults.MaxUploadSizeMb;
+        MaxHashSizeMb = defaults.MaxHashSizeMb;
+
+        SecondaryLookupsLowerRiskOnly = defaults.SecondaryLookupsLowerRiskOnly;
+        EnableCirclHashlookup = defaults.EnableCirclHashlookup;
+        EnableMetaDefender = defaults.EnableMetaDefender;
+        EnableMalwareBazaar = defaults.EnableMalwareBazaar;
+    }
 }
 
 public sealed class ScanRecord
