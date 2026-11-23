@@ -72,6 +72,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripSeparator _alertSeparator;
     private readonly ToolStripMenuItem _openDashboardMenuItem;
     private readonly ToolStripMenuItem _scanFileMenuItem;
+    private readonly ToolStripMenuItem _scanFolderMenuItem;
     private readonly ToolStripMenuItem _pauseResumeMenuItem;
     private readonly ToolStripMenuItem _checkUpdatesMenuItem;
     private readonly ToolStripMenuItem _exitMenuItem;
@@ -138,6 +139,9 @@ public sealed class TrayApplicationContext : ApplicationContext
         _scanFileMenuItem = new ToolStripMenuItem("Scan a File Now...");
         _scanFileMenuItem.Click += (_, _) => PromptManualFileScan();
 
+        _scanFolderMenuItem = new ToolStripMenuItem("Scan a Folder Now...");
+        _scanFolderMenuItem.Click += async (_, _) => await PromptManualFolderScanAsync();
+
         _pauseResumeMenuItem = new ToolStripMenuItem("Pause Monitoring");
         _pauseResumeMenuItem.Click += (_, _) => _engine.SetPaused(!_engine.IsPaused);
 
@@ -156,6 +160,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             _alertSeparator,
             _openDashboardMenuItem,
             _scanFileMenuItem,
+            _scanFolderMenuItem,
             _pauseResumeMenuItem,
             new ToolStripSeparator(),
             _checkUpdatesMenuItem,
@@ -439,6 +444,42 @@ public sealed class TrayApplicationContext : ApplicationContext
         if (dialog.ShowDialog() == DialogResult.OK)
         {
             _engine.EnqueueFile(dialog.FileName, manual: true);
+        }
+    }
+
+    private async System.Threading.Tasks.Task PromptManualFolderScanAsync()
+    {
+        using var dialog = new FolderBrowserDialog
+        {
+            Description = "Select a folder to queue for scanning (including subfolders)",
+            ShowNewFolderButton = false
+        };
+        if (dialog.ShowDialog() != DialogResult.OK || string.IsNullOrWhiteSpace(dialog.SelectedPath))
+        {
+            return;
+        }
+
+        string selectedPath = dialog.SelectedPath;
+        var (queued, _) = await System.Threading.Tasks.Task.Run(() =>
+            _engine.EnqueueDirectory(selectedPath, includeSubdirectories: true));
+
+        if (_exiting)
+        {
+            return;
+        }
+
+        if (queued > 0)
+        {
+            ShowDashboard(tabIndex: 1, focusApiKey: false);
+        }
+        else
+        {
+            _lastBalloonKind = BalloonKind.None;
+            _notifyIcon.ShowBalloonTip(
+                5000,
+                "No Matching Files Queued",
+                $"No scannable files matching your active filter were found in '{selectedPath}'.",
+                ToolTipIcon.Info);
         }
     }
 

@@ -290,6 +290,11 @@ public sealed class SettingsStore
             settings.ThemeMode = AppThemeMode.System;
         }
 
+        if (!Enum.IsDefined(settings.HeaderBrandClickAction))
+        {
+            settings.HeaderBrandClickAction = HeaderBrandClickAction.OpenRecentScans;
+        }
+
         if (string.IsNullOrWhiteSpace(settings.UpdateRepository))
         {
             settings.UpdateRepository = "sonnenfell/VTDownloadGuard";

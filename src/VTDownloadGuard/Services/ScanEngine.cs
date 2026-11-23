@@ -473,6 +473,149 @@ public sealed class ScanEngine : IDisposable
         EnqueueClassifiedInternal(normalized, manual, forceUpload, forceVirusTotal);
     }
 
+    public (int QueuedCount, int SkippedCount) EnqueueDirectory(string directoryPath, bool includeSubdirectories = true)
+    {
+        if (_disposed || string.IsNullOrWhiteSpace(directoryPath))
+        {
+            return (0, 0);
+        }
+
+        string normalizedDir;
+        try
+        {
+            normalizedDir = Path.GetFullPath(directoryPath);
+        }
+        catch
+        {
+            return (0, 0);
+        }
+
+        if (!Directory.Exists(normalizedDir))
+        {
+            return (0, 0);
+        }
+
+        AppSettings settings = CurrentSettings;
+        var candidates = new List<(string FilePath, long FileSize, FileRiskAssessment Risk)>();
+        int skipped = 0;
+
+        try
+        {
+            var options = new EnumerationOptions
+            {
+                RecurseSubdirectories = includeSubdirectories,
+                IgnoreInaccessible = true,
+                AttributesToSkip = FileAttributes.ReparsePoint
+            };
+
+            foreach (string path in Directory.EnumerateFiles(normalizedDir, "*", options))
+            {
+                if (_disposed)
+                {
+                    break;
+                }
+
+                if (!SettingsStore.ShouldScanFile(settings, path))
+                {
+                    skipped++;
+                    continue;
+                }
+
+                long fileSize;
+                try
+                {
+                    var info = new FileInfo(path);
+                    if (!info.Exists || info.Length <= 0)
+                    {
+                        skipped++;
+                        continue;
+                    }
+
+                    fileSize = info.Length;
+                }
+                catch
+                {
+                    skipped++;
+                    continue;
+                }
+
+                FileRiskAssessment risk = _riskClassifier.Classify(path, fileSize);
+                candidates.Add((path, fileSize, risk));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn($"Failed enumerating folder '{normalizedDir}': {ex.Message}");
+        }
+
+        if (candidates.Count == 0 || _disposed)
+        {
+            return (0, skipped);
+        }
+
+        int added = 0;
+        bool queueModified = false;
+        lock (_queueSync)
+        {
+            if (_disposed)
+            {
+                return (0, skipped);
+            }
+
+            var existingSet = new HashSet<string>(
+                _queuedItems.Select(i => i.FilePath),
+                StringComparer.OrdinalIgnoreCase);
+            if (_activeItem is not null)
+            {
+                existingSet.Add(_activeItem.FilePath);
+            }
+
+            foreach (var (filePath, fileSize, risk) in candidates)
+            {
+                if (!existingSet.Add(filePath))
+                {
+                    skipped++;
+                    continue;
+                }
+
+                _queuedItems.Add(new QueuedScanItem
+                {
+                    FilePath = filePath,
+                    FileName = Path.GetFileName(filePath),
+                    FileSizeBytes = fileSize,
+                    RiskCategory = risk.Category,
+                    RiskScore = risk.Score,
+                    RiskReason = risk.Reason,
+                    SignerName = risk.SignerName,
+                    EnqueuedAtUtc = DateTimeOffset.UtcNow,
+                    State = "Queued",
+                    Stage = "Waiting in queue",
+                    ManualBoost = false,
+                    BoostOrder = 0,
+                    ForceUpload = false,
+                    ForceVirusTotal = false
+                });
+                added++;
+                queueModified = true;
+            }
+
+            if (queueModified)
+            {
+                _queuedItems.Sort(CompareQueueItems);
+            }
+        }
+
+        if (added > 0)
+        {
+            _queueSignal.Release(added);
+            RaiseQueueChanged();
+            RaiseStatusChanged();
+        }
+
+        _logger.Info($"Manually queued folder '{normalizedDir}' (subfolders={includeSubdirectories}): {added} queued, {skipped} skipped.");
+        return (added, skipped);
+    }
+
     private void EnqueueClassifiedInternal(
         string normalizedPath,
         bool manual,

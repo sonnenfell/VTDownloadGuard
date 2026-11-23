@@ -38,6 +38,7 @@ public sealed class DashboardForm : Form
     private readonly Font _boldFont = new("Segoe UI Semibold", 9.0f);
     private readonly Font _bodyFont = new("Segoe UI", 9.0f);
     private readonly Font _smallFont = new("Segoe UI", 8.5f);
+    private readonly Font _smallUnderlineFont = new("Segoe UI", 8.5f, FontStyle.Underline);
     private readonly Font _pillFont = new("Segoe UI Semibold", 8.2f);
     private readonly Font _monoFont = new("Consolas", 9.0f);
 
@@ -48,10 +49,12 @@ public sealed class DashboardForm : Form
     private readonly Label _statusPillLabel;
     private readonly Label _subtitleLabel;
     private readonly ModernButton _headerScanBtn;
+    private readonly ModernButton _headerScanFolderBtn;
     private readonly ModernButton _headerPauseBtn;
     private readonly ModernButton _headerTourBtn;
     private readonly ModernButton _headerUpdateBtn;
     private readonly ModernButton _acknowledgeBtn;
+    private bool _folderScanInProgress;
     private TutorialSession? _activeTutorial;
     private bool _onboardingPromptedThisInstance;
     private readonly ModernNavBar _navBar;
@@ -87,6 +90,7 @@ public sealed class DashboardForm : Form
     private readonly ModernButton _removeQueueBtn;
     private readonly ModernButton _clearQueueBtn;
     private readonly ModernButton _queueScanFileBtn;
+    private readonly ModernButton _queueScanFolderBtn;
     private readonly List<QueuedScanItem> _displayedQueue = [];
 
     // Tab 2: Directories
@@ -95,6 +99,7 @@ public sealed class DashboardForm : Form
     private readonly ModernButton _removeDirBtn;
     private readonly ModernButton _toggleSubfoldersBtn;
     private readonly ModernButton _toggleEnabledBtn;
+    private readonly ModernButton _scanSelectedDirBtn;
     private readonly ModernButton _openDirBtn;
     private readonly List<WatchedDirectory> _displayedDirs = [];
 
@@ -135,6 +140,7 @@ public sealed class DashboardForm : Form
     private readonly Label _settingsLegendLabel;
     private readonly ComboBox _themeCombo;
     private readonly CheckBox _startupCheckBox;
+    private readonly ComboBox _brandClickActionCombo;
     private readonly Label _installedVersionLabel;
     private readonly Label _updateStatusLabel;
     private readonly LinkLabel _updateReleaseLink;
@@ -289,11 +295,13 @@ public sealed class DashboardForm : Form
             Image = new Icon(appIcon, 48, 48).ToBitmap(),
             Anchor = AnchorStyles.Left,
             Margin = new Padding(0, 0, 10, 0),
-            BackColor = Color.Transparent
+            BackColor = Color.Transparent,
+            Cursor = Cursors.Hand
         };
+        _logoBox.Click += (_, _) => ExecuteHeaderBrandClick();
         leftHeader.Controls.Add(_logoBox, 0, 0);
 
-        var titleStack = new TableLayoutPanel
+        var titleStack = new SmoothTableLayoutPanel
         {
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
@@ -322,8 +330,10 @@ public sealed class DashboardForm : Form
             Text = "VTDownloadGuard",
             AutoSize = true,
             Font = _headerTitleFont,
-            Margin = new Padding(0, 0, 10, 0)
+            Margin = new Padding(0, 0, 10, 0),
+            Cursor = Cursors.Hand
         };
+        _titleLabel.Click += (_, _) => ExecuteHeaderBrandClick();
         _statusPillLabel = new Label
         {
             AutoSize = true,
@@ -339,6 +349,21 @@ public sealed class DashboardForm : Form
             AutoSize = true,
             Font = _smallFont,
             Margin = new Padding(0, 2, 0, 0)
+        };
+        _subtitleLabel.Click += (_, _) => HandlePausedSubtitleClick();
+        _subtitleLabel.MouseEnter += (_, _) =>
+        {
+            if (_engine.IsPaused && _subtitleLabel.Cursor == Cursors.Hand)
+            {
+                _subtitleLabel.Font = _smallUnderlineFont;
+            }
+        };
+        _subtitleLabel.MouseLeave += (_, _) =>
+        {
+            if (_subtitleLabel.Font != _smallFont)
+            {
+                _subtitleLabel.Font = _smallFont;
+            }
         };
 
         titleStack.Controls.Add(titleRow, 0, 0);
@@ -362,6 +387,9 @@ public sealed class DashboardForm : Form
         _headerScanBtn = MakeButton("Scan File...", ModernButtonVariant.Primary);
         _headerScanBtn.Click += (_, _) => PromptManualFileScan();
 
+        _headerScanFolderBtn = MakeButton("Scan Folder...", ModernButtonVariant.Secondary);
+        _headerScanFolderBtn.Click += async (_, _) => await PromptManualFolderScanAsync();
+
         _headerPauseBtn = MakeButton("Pause", ModernButtonVariant.Secondary);
         _headerPauseBtn.Click += (_, _) => _engine.SetPaused(!_engine.IsPaused);
 
@@ -372,7 +400,7 @@ public sealed class DashboardForm : Form
         _headerUpdateBtn.Visible = false;
         _headerUpdateBtn.Click += (_, _) => ScrollToUpdatesCard();
 
-        rightHeader.Controls.AddRange([_acknowledgeBtn, _headerUpdateBtn, _headerScanBtn, _headerPauseBtn, _headerTourBtn]);
+        rightHeader.Controls.AddRange([_acknowledgeBtn, _headerUpdateBtn, _headerScanBtn, _headerScanFolderBtn, _headerPauseBtn, _headerTourBtn]);
 
         _headerPanel.Controls.Add(leftHeader, 0, 0);
         _headerPanel.Controls.Add(rightHeader, 1, 0);
@@ -418,7 +446,8 @@ public sealed class DashboardForm : Form
             _promoteQueueBtn,
             _removeQueueBtn,
             _clearQueueBtn,
-            _queueScanFileBtn) = BuildQueuedTab();
+            _queueScanFileBtn,
+            _queueScanFolderBtn) = BuildQueuedTab();
 
         (_tabViews[TabDirectories],
             _directoriesGrid,
@@ -426,6 +455,7 @@ public sealed class DashboardForm : Form
             _removeDirBtn,
             _toggleSubfoldersBtn,
             _toggleEnabledBtn,
+            _scanSelectedDirBtn,
             _openDirBtn) = BuildDirectoriesTab();
 
         (_tabViews[TabApi],
@@ -463,6 +493,7 @@ public sealed class DashboardForm : Form
             _settingsLegendLabel,
             _themeCombo,
             _startupCheckBox,
+            _brandClickActionCombo,
             _installedVersionLabel,
             _updateStatusLabel,
             _updateReleaseLink,
@@ -691,6 +722,7 @@ public sealed class DashboardForm : Form
             _boldFont.Dispose();
             _bodyFont.Dispose();
             _smallFont.Dispose();
+            _smallUnderlineFont.Dispose();
             _pillFont.Dispose();
             _monoFont.Dispose();
             _logoBox.Image?.Dispose();
@@ -984,7 +1016,8 @@ public sealed class DashboardForm : Form
         ModernButton PromoteBtn,
         ModernButton RemoveBtn,
         ModernButton ClearBtn,
-        ModernButton ScanFileBtn) BuildQueuedTab()
+        ModernButton ScanFileBtn,
+        ModernButton ScanFolderBtn) BuildQueuedTab()
     {
         var view = new Panel { Dock = DockStyle.Fill };
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
@@ -1083,11 +1116,14 @@ public sealed class DashboardForm : Form
         var scanFileBtn = MakeButton("Scan File...", ModernButtonVariant.Secondary);
         scanFileBtn.Click += (_, _) => PromptManualFileScan();
 
-        actions.Controls.AddRange([promoteBtn, removeBtn, clearBtn, scanFileBtn]);
+        var scanFolderBtn = MakeButton("Scan Folder...", ModernButtonVariant.Secondary);
+        scanFolderBtn.Click += async (_, _) => await PromptManualFolderScanAsync();
+
+        actions.Controls.AddRange([promoteBtn, removeBtn, clearBtn, scanFileBtn, scanFolderBtn]);
         layout.Controls.Add(actions, 0, 2);
 
         view.Controls.Add(layout);
-        return (view, bannerCard, infoLabel, countSummaryLabel, grid, promoteBtn, removeBtn, clearBtn, scanFileBtn);
+        return (view, bannerCard, infoLabel, countSummaryLabel, grid, promoteBtn, removeBtn, clearBtn, scanFileBtn, scanFolderBtn);
     }
 
     private (
@@ -1097,6 +1133,7 @@ public sealed class DashboardForm : Form
         ModernButton RemoveBtn,
         ModernButton ToggleSubfoldersBtn,
         ModernButton ToggleEnabledBtn,
+        ModernButton ScanSelectedBtn,
         ModernButton OpenDirBtn) BuildDirectoriesTab()
     {
         var view = new Panel { Dock = DockStyle.Fill };
@@ -1143,15 +1180,19 @@ public sealed class DashboardForm : Form
         toggleEnabledBtn.Enabled = false;
         toggleEnabledBtn.Click += (_, _) => ToggleSelectedDirectoryEnabled();
 
+        var scanSelectedBtn = MakeButton("Scan Selected Folder", ModernButtonVariant.Secondary);
+        scanSelectedBtn.Enabled = false;
+        scanSelectedBtn.Click += async (_, _) => await ScanSelectedWatchedFolderAsync();
+
         var openDirBtn = MakeButton("Open in Explorer", ModernButtonVariant.Secondary);
         openDirBtn.Enabled = false;
         openDirBtn.Click += (_, _) => OpenSelectedDirectoryInExplorer();
 
-        actions.Controls.AddRange([addBtn, removeBtn, toggleSubBtn, toggleEnabledBtn, openDirBtn]);
+        actions.Controls.AddRange([addBtn, removeBtn, toggleSubBtn, toggleEnabledBtn, scanSelectedBtn, openDirBtn]);
         layout.Controls.Add(actions, 0, 1);
 
         view.Controls.Add(layout);
-        return (view, grid, addBtn, removeBtn, toggleSubBtn, toggleEnabledBtn, openDirBtn);
+        return (view, grid, addBtn, removeBtn, toggleSubBtn, toggleEnabledBtn, scanSelectedBtn, openDirBtn);
     }
 
     private (
@@ -1321,6 +1362,7 @@ public sealed class DashboardForm : Form
         Label LegendLabel,
         ComboBox ThemeCombo,
         CheckBox StartupCheckBox,
+        ComboBox BrandClickActionCombo,
         Label InstalledVersionLabel,
         Label UpdateStatusLabel,
         LinkLabel UpdateReleaseLink,
@@ -1420,6 +1462,25 @@ public sealed class DashboardForm : Form
             startupCheck,
             "Enabled",
             () => startupCheck.Checked), 0, gr++);
+
+        AddSectionDivider(genTable, ref gr);
+
+        AddSettingFieldHeader(genTable, ref gr, "Clicking app icon or title", addTopSpacing: false);
+        var brandClickActionCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 280, Margin = new Padding(0, 0, 0, 4) };
+        brandClickActionCombo.Items.AddRange(
+        [
+            "Open Recent Scans *",
+            "Open Queued",
+            "Open Directories",
+            "Open API",
+            "Open Settings",
+            "Toggle monitoring on/off"
+        ]);
+        brandClickActionCombo.SelectedIndexChanged += (_, _) => UpdateRecommendedStarIndicators();
+        genTable.Controls.Add(WrapWithRecommendedStar(
+            brandClickActionCombo,
+            "Open Recent Scans",
+            () => brandClickActionCombo.SelectedIndex == (int)HeaderBrandClickAction.OpenRecentScans), 0, gr++);
 
         AddSectionDivider(genTable, ref gr);
 
@@ -1834,7 +1895,7 @@ public sealed class DashboardForm : Form
 
         view.Controls.Add(root);
         return (view, scroll, generalCard, updatesCard, vtCard, secCard, resetCard, saveBar, legendLabel,
-            themeCombo, startupCheck,
+            themeCombo, startupCheck, brandClickActionCombo,
             installedVersionLabel, updateStatusLabel, updateReleaseLink, updateProgressBar,
             checkUpdatesBtn, installUpdateBtn, autoUpdateModeCombo, updateHelperLabel,
             apiKeyBox, toggleKeyBtn, testKeyBtn, keyStatusLabel, uploadPolicyCombo, filterModeCombo,
@@ -2234,6 +2295,54 @@ public sealed class DashboardForm : Form
         RefreshApiTab();
     }
 
+    public void ExecuteHeaderBrandClick()
+    {
+        switch (_engine.CurrentSettings.HeaderBrandClickAction)
+        {
+            case HeaderBrandClickAction.OpenQueued:
+                SelectTab(TabQueued);
+                break;
+            case HeaderBrandClickAction.OpenDirectories:
+                SelectTab(TabDirectories);
+                break;
+            case HeaderBrandClickAction.OpenApi:
+                SelectTab(TabApi);
+                break;
+            case HeaderBrandClickAction.OpenSettings:
+                SelectTab(TabSettings);
+                break;
+            case HeaderBrandClickAction.ToggleMonitoring:
+                _engine.SetPaused(!_engine.IsPaused);
+                break;
+            default:
+                SelectTab(TabRecentScans);
+                break;
+        }
+    }
+
+    public void HandlePausedSubtitleClick()
+    {
+        if (_engine.IsPaused)
+        {
+            _engine.SetPaused(false);
+        }
+    }
+
+    private void UpdateHeaderToolTips()
+    {
+        string tip = _engine.CurrentSettings.HeaderBrandClickAction switch
+        {
+            HeaderBrandClickAction.OpenQueued => "Click to open Queued",
+            HeaderBrandClickAction.OpenDirectories => "Click to open Directories",
+            HeaderBrandClickAction.OpenApi => "Click to open API",
+            HeaderBrandClickAction.OpenSettings => "Click to open Settings",
+            HeaderBrandClickAction.ToggleMonitoring => "Click to pause or resume monitoring",
+            _ => "Click to open Recent Scans"
+        };
+        _settingsToolTip.SetToolTip(_logoBox, tip);
+        _settingsToolTip.SetToolTip(_titleLabel, tip);
+    }
+
     private void RefreshHeaderStatus()
     {
         TrayStatus status = _engine.CurrentTrayStatus;
@@ -2241,6 +2350,11 @@ public sealed class DashboardForm : Form
 
         _headerPauseBtn.Text = paused ? "Resume" : "Pause";
         _acknowledgeBtn.Visible = status == TrayStatus.Unsafe;
+        _subtitleLabel.Cursor = Cursors.Default;
+        _subtitleLabel.Font = _smallFont;
+        _subtitleLabel.ForeColor = _palette.TextSecondary;
+        _settingsToolTip.SetToolTip(_subtitleLabel, string.Empty);
+        UpdateHeaderToolTips();
 
         if (status == TrayStatus.Unsafe)
         {
@@ -2272,7 +2386,10 @@ public sealed class DashboardForm : Form
             _statusPillLabel.Text = "PAUSED";
             _statusPillLabel.BackColor = _palette.NeutralBg;
             _statusPillLabel.ForeColor = _palette.NeutralSlate;
-            _subtitleLabel.Text = "Folder monitoring is paused. Click Resume to monitor new downloads.";
+            _subtitleLabel.Text = "Folder monitoring is paused. Click here to resume.";
+            _subtitleLabel.Cursor = Cursors.Hand;
+            _subtitleLabel.ForeColor = _palette.AccentBlue;
+            _settingsToolTip.SetToolTip(_subtitleLabel, "Click to turn folder monitoring back on");
         }
         else
         {
@@ -2654,10 +2771,12 @@ public sealed class DashboardForm : Form
     {
         WatchedDirectory? dir = GetSelectedDirectory();
         bool hasSelection = dir is not null;
+        bool exists = hasSelection && Directory.Exists(dir!.Path);
         _removeDirBtn.Enabled = hasSelection;
         _toggleSubfoldersBtn.Enabled = hasSelection;
         _toggleEnabledBtn.Enabled = hasSelection;
-        _openDirBtn.Enabled = hasSelection && Directory.Exists(dir!.Path);
+        _scanSelectedDirBtn.Enabled = exists && !_folderScanInProgress;
+        _openDirBtn.Enabled = exists;
     }
 
     private void RefreshApiRateWindowOnly()
@@ -2909,6 +3028,86 @@ public sealed class DashboardForm : Form
         }
     }
 
+    private async Task PromptManualFolderScanAsync()
+    {
+        if (_folderScanInProgress)
+        {
+            return;
+        }
+
+        using var dialog = new FolderBrowserDialog
+        {
+            Description = "Select a folder to queue for scanning (including subfolders)",
+            ShowNewFolderButton = false
+        };
+        if (dialog.ShowDialog(this) == DialogResult.OK && !string.IsNullOrWhiteSpace(dialog.SelectedPath))
+        {
+            await QueueFolderForScanAsync(dialog.SelectedPath, includeSubdirectories: true);
+        }
+    }
+
+    private async Task ScanSelectedWatchedFolderAsync()
+    {
+        if (_folderScanInProgress)
+        {
+            return;
+        }
+
+        WatchedDirectory? dir = GetSelectedDirectory();
+        if (dir is null || !Directory.Exists(dir.Path))
+        {
+            return;
+        }
+
+        await QueueFolderForScanAsync(dir.Path, dir.IncludeSubdirectories);
+    }
+
+    private async Task QueueFolderForScanAsync(string folderPath, bool includeSubdirectories)
+    {
+        if (_folderScanInProgress || IsDisposed)
+        {
+            return;
+        }
+
+        _folderScanInProgress = true;
+        _headerScanFolderBtn.Enabled = false;
+        _queueScanFolderBtn.Enabled = false;
+        _scanSelectedDirBtn.Enabled = false;
+
+        try
+        {
+            var (queued, _) = await Task.Run(() => _engine.EnqueueDirectory(folderPath, includeSubdirectories));
+            if (IsDisposed)
+            {
+                return;
+            }
+
+            if (queued > 0)
+            {
+                SelectTab(TabQueued);
+            }
+            else
+            {
+                MessageBox.Show(
+                    this,
+                    $"No scannable files matching your current filter were found in:\n{folderPath}",
+                    "No Files Queued",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+        }
+        finally
+        {
+            _folderScanInProgress = false;
+            if (!IsDisposed)
+            {
+                _headerScanFolderBtn.Enabled = true;
+                _queueScanFolderBtn.Enabled = true;
+                UpdateDirectoryButtons();
+            }
+        }
+    }
+
     private void AddWatchedFolder()
     {
         using var dialog = new FolderBrowserDialog
@@ -3006,6 +3205,7 @@ public sealed class DashboardForm : Form
         AppSettings s = _engine.CurrentSettings;
         _themeCombo.SelectedIndex = Math.Clamp((int)s.ThemeMode, 0, _themeCombo.Items.Count - 1);
         _startupCheckBox.Checked = StartupManager.IsStartupEnabled() || s.StartWithWindows;
+        _brandClickActionCombo.SelectedIndex = Math.Clamp((int)s.HeaderBrandClickAction, 0, _brandClickActionCombo.Items.Count - 1);
 
         _apiKeyTextBox.Text = SettingsStore.GetDecryptedApiKey(s);
         _uploadPolicyCombo.SelectedIndex = Math.Clamp((int)s.UploadPolicy, 0, _uploadPolicyCombo.Items.Count - 1);
@@ -3040,6 +3240,7 @@ public sealed class DashboardForm : Form
         AppSettings settings = _engine.CurrentSettings;
         settings.ThemeMode = (AppThemeMode)Math.Clamp(_themeCombo.SelectedIndex, 0, 2);
         settings.StartWithWindows = _startupCheckBox.Checked;
+        settings.HeaderBrandClickAction = (HeaderBrandClickAction)Math.Clamp(_brandClickActionCombo.SelectedIndex, 0, 5);
         switch (_autoUpdateModeCombo.SelectedIndex)
         {
             case 0:
@@ -3186,6 +3387,8 @@ public sealed class DashboardForm : Form
             indicator.IsAtRecommended = isRecommended();
         }
     }
+
+    public int ActiveTabIndex => _activeTabIndex;
 
     public (int HeaderBottom, int NavTop, int SubtitleBottom, int HeaderHeight, int ScanBtnBottom) GetHeaderLayoutMetricsForTest()
     {

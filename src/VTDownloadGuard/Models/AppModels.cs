@@ -18,6 +18,16 @@ public enum FileFilterMode
     AllFiles = 1
 }
 
+public enum HeaderBrandClickAction
+{
+    OpenRecentScans = 0,
+    OpenQueued = 1,
+    OpenDirectories = 2,
+    OpenApi = 3,
+    OpenSettings = 4,
+    ToggleMonitoring = 5
+}
+
 public enum ScanVerdict
 {
     Clean = 0,
@@ -227,6 +237,7 @@ public sealed class AppSettings
     public bool AutoUpdateEnabled { get; set; } = true;
     public bool AutoUpdateCriticalOnly { get; set; } = true;
     public string UpdateRepository { get; set; } = "sonnenfell/VTDownloadGuard";
+    public HeaderBrandClickAction HeaderBrandClickAction { get; set; } = HeaderBrandClickAction.OpenRecentScans;
 
     public static string GetDefaultDownloadsDirectory()
     {
@@ -389,7 +400,8 @@ public sealed class AppSettings
             OnboardingCompleted = false,
             AutoUpdateEnabled = true,
             AutoUpdateCriticalOnly = true,
-            UpdateRepository = "sonnenfell/VTDownloadGuard"
+            UpdateRepository = "sonnenfell/VTDownloadGuard",
+            HeaderBrandClickAction = HeaderBrandClickAction.OpenRecentScans
         };
     }
 
@@ -418,7 +430,8 @@ public sealed class AppSettings
             OnboardingCompleted = OnboardingCompleted,
             AutoUpdateEnabled = AutoUpdateEnabled,
             AutoUpdateCriticalOnly = AutoUpdateCriticalOnly,
-            UpdateRepository = UpdateRepository
+            UpdateRepository = UpdateRepository,
+            HeaderBrandClickAction = HeaderBrandClickAction
         };
     }
 
@@ -429,6 +442,7 @@ public sealed class AppSettings
         StartWithWindows = defaults.StartWithWindows;
         AutoUpdateEnabled = defaults.AutoUpdateEnabled;
         AutoUpdateCriticalOnly = defaults.AutoUpdateCriticalOnly;
+        HeaderBrandClickAction = defaults.HeaderBrandClickAction;
 
         UploadPolicy = defaults.UploadPolicy;
         FilterMode = defaults.FilterMode;

@@ -19,11 +19,12 @@ It runs quietly in the background with almost zero idle CPU usage, sorts pending
   - **OPSWAT MetaDefender Cloud** (optional, disabled by default, requires free API key).
   - **MalwareBazaar by abuse.ch** (optional, disabled by default, requires free Auth-Key).
   - Includes an option in Settings to run secondary lookups only on lower-risk files (`Low Risk` and `Likely Safe`).
-- **Queued Tab**: Displays active, queued, and stabilizing files in exact priority order, with controls to move a file to the top, remove items, or clear the queue.
+- **Manual File and Folder Scanning**: Scan individual files or recursively queue whole folders (including subfolders) in risk-priority order from the header bar, the **Queued** tab, the **Directories** tab, or the system tray menu.
+- **Queued Tab**: Displays active, queued, and stabilizing files in exact priority order, with controls to move a file to the top, remove items, clear the queue, or queue a file or folder.
 - **API Tab**: Tracks your local minute rate-limit window, live hourly/daily/monthly quotas pulled directly from the VirusTotal user quota endpoint (`/api/v3/users/{apikey}`), cache hit savings, and per-service secondary lookup counts.
 - **Detection Sensitivity Slider**: Choose how many antivirus vendors must flag a file before it triggers an unsafe alert (default `2+` vendors recommended), with color-coded feedback and clear guidance on false positives versus missed detections.
 - **Guided First-Run Setup and Optional UI Tour**: Automatically discovers and initializes your Windows Downloads directories, suggests detected game folders, helps connect your API keys, and offers an optional spotlight UI tour highlighting key controls (reopenable anytime from the header bar or Settings).
-- **VirusTotal-Inspired Interface**: Clean dashboard with Dark, Light, and Follow Windows themes, verdict and risk pills, live search/filtering, and a matching system tray icon (`Green` = safe, `Blue animated` = checking, `Red` = unsafe file detected, `Gray` = setup needed).
+- **VirusTotal-Inspired Interface**: Clean dashboard with Dark, Light, and Follow Windows themes, verdict and risk pills, live search/filtering, configurable top-left icon/title click action (defaults to **Recent Scans** or toggle monitoring), clickable paused status banner to resume monitoring, and a matching system tray icon (`Green` = safe, `Blue animated` = checking, `Red` = unsafe file detected, `Gray` = setup needed).
 - **Local Privacy and Security**: All API keys are encrypted locally with Windows DPAPI (`CryptProtectData` scoped to your Windows user account). Files are always checked by SHA-256 hash first; only unknown executables/scripts within your configured size limit (32 MB by default) are uploaded when auto-upload is enabled.
 
 ## Installation on Windows
@@ -32,7 +33,7 @@ It runs quietly in the background with almost zero idle CPU usage, sorts pending
 
 Use this option on any 64-bit Windows 10 or Windows 11 PC. No extra runtime or SDK is required.
 
-1. Go to the **Releases** page on GitHub and download `VTDownloadGuard-1.2.2-win-x64-Setup.exe`.
+1. Go to the **Releases** page on GitHub and download `VTDownloadGuard-1.2.3-win-x64-Setup.exe`.
 2. Double-click the installer and follow the setup steps.
 3. Keep **Start automatically minimized to the system tray when Windows starts** checked if you want background protection on every login.
 4. Click **Finish** to launch VTDownloadGuard.
@@ -41,7 +42,7 @@ Use this option on any 64-bit Windows 10 or Windows 11 PC. No extra runtime or S
 
 Use this option if you already have the **.NET 10 Desktop Runtime (x64)** installed and want a tiny portable folder (under 1 MB).
 
-1. Download `VTDownloadGuard-1.2.2-win-x64-Portable-FrameworkDependent.zip` from the **Releases** page.
+1. Download `VTDownloadGuard-1.2.3-win-x64-Portable-FrameworkDependent.zip` from the **Releases** page.
 2. Extract the zip to a folder of your choice (for example, `C:\Program Files\VTDownloadGuard` or `%LocalAppData%\VTDownloadGuard`).
 3. Run `VTDownloadGuard.exe --open` to open the dashboard on first launch.
 

@@ -65,6 +65,7 @@ internal static class Program
             ("VirusTotalClient verdicts, upload polling, quota endpoint, auth, and 429 retry", TestVirusTotalClient),
             ("RateLimiter sliding window enforcement and snapshot", TestRateLimiter),
             ("Priority queue ordering, promote, remove, and clear", TestPriorityQueueOrdering),
+            ("Manual folder scanning recursively queues filtered files in priority order", TestManualFolderQueueing),
             ("Secondary short-circuit end-to-end saves VT quota", TestSecondaryShortCircuitEndToEnd),
             ("ScanEngine + DirectoryWatcherManager + FileStabilizer end-to-end", TestEndToEndScanning),
             ("TrayIconFactory loads AppIcon and renders all status shields", TestTrayIconFactory),
@@ -827,6 +828,69 @@ internal static class Program
         }
     }
 
+    private static async Task TestManualFolderQueueing()
+    {
+        string tempDir = CreateTempDir();
+        string dataDir = Path.Combine(tempDir, "Data");
+        string rootDir = Path.Combine(tempDir, "FolderScan");
+        string nestedDir = Path.Combine(rootDir, "sub", "nested");
+        Directory.CreateDirectory(nestedDir);
+
+        try
+        {
+            var paths = new AppPaths(dataDir, Path.Combine(tempDir, "UpdateStaging"));
+            var logger = new AppLogger(paths);
+            var settingsStore = new SettingsStore(paths, logger);
+            var settings = new AppSettings
+            {
+                WatchedDirectories = [],
+                FilterMode = FileFilterMode.ExecutablesScriptsAndArchives,
+                EnableCirclHashlookup = false,
+                MaxRequestsPerMinute = 100
+            };
+            settingsStore.Save(settings);
+
+            var history = new HistoryAndCacheStore(paths, logger);
+            var limiter = new RateLimiter(100);
+
+            string topExe = Path.Combine(rootDir, "high.exe");
+            string nestedZip = Path.Combine(nestedDir, "archive.zip");
+            string ignoredPng = Path.Combine(nestedDir, "ignore.png");
+            string tempDl = Path.Combine(nestedDir, "temp.exe.crdownload");
+            string emptyExe = Path.Combine(nestedDir, "empty.exe");
+
+            await File.WriteAllBytesAsync(topExe, Encoding.UTF8.GetBytes("HIGH_RISK_EXE"));
+            await File.WriteAllBytesAsync(nestedZip, Encoding.UTF8.GetBytes("MEDIUM_ARCHIVE"));
+            await File.WriteAllBytesAsync(ignoredPng, [1, 2, 3, 4]);
+            await File.WriteAllBytesAsync(tempDl, Encoding.UTF8.GetBytes("TEMP_CRDL"));
+            await File.WriteAllBytesAsync(emptyExe, []);
+
+            var handler = new MockHttpHandler((_, _) => JsonResponse(HttpStatusCode.NotFound, "{}"));
+            using var vtClient = new VirusTotalClient(limiter, logger, new HttpClient(handler));
+            using var engine = new ScanEngine(settingsStore, history, limiter, vtClient, logger);
+
+            var (queuedCount, skippedCount) = engine.EnqueueDirectory(rootDir, includeSubdirectories: true);
+            Assert(queuedCount == 2, $"Expected 2 queued files from recursive folder scan, got {queuedCount}.");
+            Assert(skippedCount >= 3, $"Expected at least 3 skipped files (.png, .crdownload, empty), got {skippedCount}.");
+
+            var snap = engine.GetQueueSnapshot().Where(q => q.State == "Queued").ToList();
+            Assert(snap.Count == 2, $"Expected 2 queued items in snapshot, got {snap.Count}.");
+            Assert(snap[0].FileName == "high.exe" && snap[1].FileName == "archive.zip",
+                $"Expected risk-prioritized ordering high.exe -> archive.zip, got {snap[0].FileName} -> {snap[1].FileName}.");
+
+            _ = engine.ClearQueue();
+
+            var (flatQueued, _) = engine.EnqueueDirectory(rootDir, includeSubdirectories: false);
+            Assert(flatQueued == 1, $"Expected 1 queued file without subfolders, got {flatQueued}.");
+            var flatSnap = engine.GetQueueSnapshot().Where(q => q.State == "Queued").ToList();
+            Assert(flatSnap.Count == 1 && flatSnap[0].FileName == "high.exe", "Top-level scan should enqueue only high.exe.");
+        }
+        finally
+        {
+            CleanupDir(tempDir);
+        }
+    }
+
     private static async Task TestSecondaryShortCircuitEndToEnd()
     {
         string tempDir = CreateTempDir();
@@ -1452,6 +1516,7 @@ internal static class Program
         s.EnableMalwareBazaar = true;
         s.AutoUpdateEnabled = false;
         s.AutoUpdateCriticalOnly = false;
+        s.HeaderBrandClickAction = HeaderBrandClickAction.ToggleMonitoring;
 
         s.ResetPreferencesToDefaults();
 
@@ -1471,6 +1536,7 @@ internal static class Program
         Assert(s.EnableMalwareBazaar == defaults.EnableMalwareBazaar, "EnableMalwareBazaar must reset to default.");
         Assert(s.AutoUpdateEnabled == defaults.AutoUpdateEnabled, "AutoUpdateEnabled must reset to default.");
         Assert(s.AutoUpdateCriticalOnly == defaults.AutoUpdateCriticalOnly, "AutoUpdateCriticalOnly must reset to default.");
+        Assert(s.HeaderBrandClickAction == HeaderBrandClickAction.OpenRecentScans, "HeaderBrandClickAction must reset to OpenRecentScans.");
 
         Assert(SettingsStore.GetDecryptedApiKey(s) == "vt-keep-me", "VT API key must be preserved on reset.");
         Assert(SettingsStore.GetDecryptedMetaDefenderApiKey(s) == "md-keep-me", "MetaDefender key must be preserved on reset.");
@@ -1583,6 +1649,27 @@ internal static class Program
 
                 form.Size = new System.Drawing.Size(1180, 760);
                 form.PerformLayout();
+
+                // Verify configurable header brand click and clickable paused subtitle
+                settings.HeaderBrandClickAction = HeaderBrandClickAction.OpenSettings;
+                engine.ApplySettings(settings);
+                form.SelectTab(0);
+                form.ExecuteHeaderBrandClick();
+                Assert(form.ActiveTabIndex == 4, $"Expected Settings tab (4), got {form.ActiveTabIndex}.");
+
+                settings.HeaderBrandClickAction = HeaderBrandClickAction.OpenRecentScans;
+                engine.ApplySettings(settings);
+                form.ExecuteHeaderBrandClick();
+                Assert(form.ActiveTabIndex == 0, $"Expected Recent Scans tab (0), got {form.ActiveTabIndex}.");
+
+                settings.HeaderBrandClickAction = HeaderBrandClickAction.ToggleMonitoring;
+                engine.ApplySettings(settings);
+                Assert(!engine.IsPaused, "Engine should start unpaused.");
+                form.ExecuteHeaderBrandClick();
+                Assert(engine.IsPaused, "Brand click ToggleMonitoring should pause engine.");
+
+                form.HandlePausedSubtitleClick();
+                Assert(!engine.IsPaused, "Clicking paused subtitle should resume monitoring.");
 
                 // Exercise OnboardingDialog across all 4 steps (Dark)
                 using (var onboardingDark = new OnboardingDialog(engine, logger, icons.AppIcon))

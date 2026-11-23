@@ -9,9 +9,9 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>VTDownloadGuard</AssemblyName>
     <RootNamespace>VTDownloadGuard</RootNamespace>
-    <Version>1.2.2</Version>
-    <AssemblyVersion>1.2.2.0</AssemblyVersion>
-    <FileVersion>1.2.2.0</FileVersion>
+    <Version>1.2.3</Version>
+    <AssemblyVersion>1.2.3.0</AssemblyVersion>
+    <FileVersion>1.2.3.0</FileVersion>
     <Product>VTDownloadGuard</Product>
     <Description>Automatic VirusTotal download and game folder monitor</Description>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
