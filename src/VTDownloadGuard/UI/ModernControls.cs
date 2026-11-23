@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace VTDownloadGuard.UI;
@@ -999,5 +1000,106 @@ public sealed class SmoothTableLayoutPanel : TableLayoutPanel
     {
         DoubleBuffered = true;
         SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
+    }
+}
+
+internal static class MouseWheelScrollForwarder
+{
+    internal const int WmMouseWheel = 0x020A;
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    public static void ForwardToScrollableParent(Control source, ref Message m)
+    {
+        ScrollableControl? parent = FindScrollableParent(source);
+        if (parent is not null && parent.IsHandleCreated)
+        {
+            _ = SendMessage(parent.Handle, m.Msg, m.WParam, m.LParam);
+        }
+    }
+
+    public static void ForwardDeltaToScrollableParent(Control source, int delta)
+    {
+        ScrollableControl? parent = FindScrollableParent(source);
+        if (parent is null || !parent.IsHandleCreated)
+        {
+            return;
+        }
+
+        int hiWord = (delta & 0xFFFF) << 16;
+        _ = SendMessage(parent.Handle, WmMouseWheel, (IntPtr)unchecked(hiWord), IntPtr.Zero);
+    }
+
+    private static ScrollableControl? FindScrollableParent(Control source)
+    {
+        Control? current = source.Parent;
+        while (current is not null)
+        {
+            if (current is ScrollableControl scrollable && scrollable.AutoScroll)
+            {
+                return scrollable;
+            }
+
+            current = current.Parent;
+        }
+
+        return null;
+    }
+}
+
+public sealed class NoWheelComboBox : ComboBox
+{
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        if (!DroppedDown)
+        {
+            if (e is HandledMouseEventArgs handled)
+            {
+                handled.Handled = true;
+            }
+
+            MouseWheelScrollForwarder.ForwardDeltaToScrollableParent(this, e.Delta);
+            return;
+        }
+
+        base.OnMouseWheel(e);
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == MouseWheelScrollForwarder.WmMouseWheel && !DroppedDown)
+        {
+            MouseWheelScrollForwarder.ForwardToScrollableParent(this, ref m);
+            m.Result = IntPtr.Zero;
+            return;
+        }
+
+        base.WndProc(ref m);
+    }
+}
+
+public sealed class NoWheelNumericUpDown : NumericUpDown
+{
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        if (e is HandledMouseEventArgs handled)
+        {
+            handled.Handled = true;
+        }
+
+        MouseWheelScrollForwarder.ForwardDeltaToScrollableParent(this, e.Delta);
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == MouseWheelScrollForwarder.WmMouseWheel)
+        {
+            MouseWheelScrollForwarder.ForwardToScrollableParent(this, ref m);
+            m.Result = IntPtr.Zero;
+            return;
+        }
+
+        base.WndProc(ref m);
     }
 }

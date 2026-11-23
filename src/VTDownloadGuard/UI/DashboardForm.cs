@@ -21,9 +21,16 @@ public sealed class DashboardForm : Form
     private const int TabSettings = 4;
     private const int WmSetRedraw = 0x000B;
     private const int WsExComposited = 0x02000000;
+    private const uint RdwInvalidate = 0x0001;
+    private const uint RdwAllChildren = 0x0080;
+    private const uint RdwFrame = 0x0400;
+    private const string UnsavedChangesText = "Unsaved changes - click Save Settings to apply.";
 
     [DllImport("user32.dll")]
     private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, uint flags);
 
     private readonly ScanEngine _engine;
     private readonly AppPaths _paths;
@@ -51,10 +58,11 @@ public sealed class DashboardForm : Form
     private readonly ModernButton _headerScanBtn;
     private readonly ModernButton _headerScanFolderBtn;
     private readonly ModernButton _headerPauseBtn;
-    private readonly ModernButton _headerTourBtn;
     private readonly ModernButton _headerUpdateBtn;
     private readonly ModernButton _acknowledgeBtn;
     private bool _folderScanInProgress;
+    private bool _tabsPrewarmed;
+    private bool _isLoadingSettings;
     private TutorialSession? _activeTutorial;
     private bool _onboardingPromptedThisInstance;
     private readonly ModernNavBar _navBar;
@@ -131,6 +139,7 @@ public sealed class DashboardForm : Form
 
     // Tab 4: Settings
     private readonly FlowLayoutPanel _settingsScrollPanel;
+    private readonly ModernCardPanel _setupHelpCard;
     private readonly ModernCardPanel _generalCard;
     private readonly ModernCardPanel _updatesCard;
     private readonly ModernCardPanel _vtSettingsCard;
@@ -393,14 +402,11 @@ public sealed class DashboardForm : Form
         _headerPauseBtn = MakeButton("Pause", ModernButtonVariant.Secondary);
         _headerPauseBtn.Click += (_, _) => _engine.SetPaused(!_engine.IsPaused);
 
-        _headerTourBtn = MakeButton("UI Tour", ModernButtonVariant.Ghost);
-        _headerTourBtn.Click += (_, _) => StartUiTutorial();
-
         _headerUpdateBtn = MakeButton("Update Ready", ModernButtonVariant.Primary);
         _headerUpdateBtn.Visible = false;
         _headerUpdateBtn.Click += (_, _) => ScrollToUpdatesCard();
 
-        rightHeader.Controls.AddRange([_acknowledgeBtn, _headerUpdateBtn, _headerScanBtn, _headerScanFolderBtn, _headerPauseBtn, _headerTourBtn]);
+        rightHeader.Controls.AddRange([_acknowledgeBtn, _headerUpdateBtn, _headerScanBtn, _headerScanFolderBtn, _headerPauseBtn]);
 
         _headerPanel.Controls.Add(leftHeader, 0, 0);
         _headerPanel.Controls.Add(rightHeader, 1, 0);
@@ -484,6 +490,7 @@ public sealed class DashboardForm : Form
 
         (_tabViews[TabSettings],
             _settingsScrollPanel,
+            _setupHelpCard,
             _generalCard,
             _updatesCard,
             _vtSettingsCard,
@@ -589,10 +596,55 @@ public sealed class DashboardForm : Form
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
+        if (!_tabsPrewarmed)
+        {
+            _tabsPrewarmed = true;
+            BeginInvoke(PrewarmHeavyTabsOnce);
+        }
+
         if (!_onboardingPromptedThisInstance && !_engine.CurrentSettings.OnboardingCompleted)
         {
             _onboardingPromptedThisInstance = true;
             BeginInvoke(ShowOnboardingWizard);
+        }
+    }
+
+    private void PrewarmHeavyTabsOnce()
+    {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        SetRedraw(_contentHost, false);
+        try
+        {
+            UpdateResponsiveCards(_apiScrollPanel, force: true);
+            UpdateResponsiveCards(_settingsScrollPanel, force: true);
+            EnsureHandlesCreatedRecursive(_tabViews[TabSettings]);
+            EnsureHandlesCreatedRecursive(_tabViews[TabApi]);
+        }
+        finally
+        {
+            SetRedraw(_contentHost, true);
+        }
+    }
+
+    private static void EnsureHandlesCreatedRecursive(Control root)
+    {
+        if (root.IsDisposed)
+        {
+            return;
+        }
+
+        if (!root.IsHandleCreated)
+        {
+            _ = root.Handle;
+        }
+
+        foreach (Control child in root.Controls)
+        {
+            EnsureHandlesCreatedRecursive(child);
         }
     }
 
@@ -661,7 +713,7 @@ public sealed class DashboardForm : Form
                 TabRecentScans,
                 () => _headerPanel,
                 "Status Header and Quick Actions",
-                "Shows your live protection status at a glance. From here you can manually scan any file, pause or resume monitoring, acknowledge alerts, or reopen this tour."),
+                "Shows your live protection status at a glance. From here you can manually scan a file or folder, pause or resume monitoring, or acknowledge alerts."),
             new(
                 TabRecentScans,
                 () => _navBar,
@@ -762,6 +814,12 @@ public sealed class DashboardForm : Form
             return;
         }
 
+        if (tabIndex == _activeTabIndex && _tabViews[tabIndex].Visible && !focusApiKey)
+        {
+            return;
+        }
+
+        int prevTab = _activeTabIndex;
         _activeTabIndex = tabIndex;
         _navBar.SelectedIndex = tabIndex;
 
@@ -769,10 +827,20 @@ public sealed class DashboardForm : Form
         _contentHost.SuspendLayout();
         try
         {
+            if (prevTab >= 0 && prevTab < _tabViews.Length && prevTab != tabIndex && _tabViews[prevTab].Visible)
+            {
+                _tabViews[prevTab].Visible = false;
+            }
+
             for (int i = 0; i < _tabViews.Length; i++)
             {
-                _tabViews[i].Visible = i == tabIndex;
+                if (i != tabIndex && _tabViews[i].Visible)
+                {
+                    _tabViews[i].Visible = false;
+                }
             }
+
+            _tabViews[tabIndex].Visible = true;
 
             if (tabIndex == TabQueued)
             {
@@ -784,22 +852,21 @@ public sealed class DashboardForm : Form
             }
             else if (tabIndex == TabApi)
             {
-                UpdateResponsiveCards(_apiScrollPanel, force: true);
+                UpdateResponsiveCards(_apiScrollPanel, force: false);
                 RefreshApiTab();
             }
             else if (tabIndex == TabSettings)
             {
-                UpdateResponsiveCards(_settingsScrollPanel, force: true);
+                UpdateResponsiveCards(_settingsScrollPanel, force: false);
             }
         }
         finally
         {
             _contentHost.ResumeLayout(true);
             SetRedraw(_contentHost, true);
-            if (_contentHost.IsHandleCreated && !_contentHost.IsDisposed)
+            if (_tabViews[tabIndex].IsHandleCreated && !_tabViews[tabIndex].IsDisposed)
             {
-                _contentHost.Invalidate(true);
-                _contentHost.Update();
+                _ = RedrawWindow(_tabViews[tabIndex].Handle, IntPtr.Zero, IntPtr.Zero, RdwInvalidate | RdwFrame | RdwAllChildren);
             }
         }
 
@@ -897,7 +964,7 @@ public sealed class DashboardForm : Form
         };
         searchBox.TextChanged += (_, _) => RefreshHistoryGrid();
 
-        var verdictFilter = new ComboBox
+        var verdictFilter = new NoWheelComboBox
         {
             DropDownStyle = ComboBoxStyle.DropDownList,
             Width = 175,
@@ -1353,6 +1420,7 @@ public sealed class DashboardForm : Form
     private (
         Panel View,
         FlowLayoutPanel ScrollPanel,
+        ModernCardPanel SetupHelpCard,
         ModernCardPanel GeneralCard,
         ModernCardPanel UpdatesCard,
         ModernCardPanel VtCard,
@@ -1431,6 +1499,33 @@ public sealed class DashboardForm : Form
         _wrappingSettingsLabels.Add(legendLabel);
         scroll.Controls.Add(legendLabel);
 
+        // Card 0: Setup and Help
+        var setupHelpCard = CreateResponsiveCard(scroll, out TableLayoutPanel setupTable, 1);
+        setupTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+        int sh = 0;
+        var setupTitle = new Label { Text = "Setup and Help", Font = _sectionTitleFont, AutoSize = true, Margin = new Padding(0, 0, 0, 6) };
+        setupTable.Controls.Add(setupTitle, 0, sh++);
+
+        var setupDescLabel = new Label
+        {
+            Text = "Run the guided setup wizard to configure watched folders and API keys, or start the interactive UI tour anytime.",
+            AutoSize = true,
+            MaximumSize = new Size(680, 0),
+            Font = _smallFont,
+            Margin = new Padding(0, 0, 0, 10)
+        };
+        _wrappingSettingsLabels.Add(setupDescLabel);
+        setupTable.Controls.Add(setupDescLabel, 0, sh++);
+
+        var helpButtonsRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 2, 0, 2) };
+        var runWizardBtn = MakeButton("Run Setup Wizard", ModernButtonVariant.Secondary);
+        runWizardBtn.Click += (_, _) => ShowOnboardingWizard();
+        var startTourBtn = MakeButton("Start UI Tour", ModernButtonVariant.Secondary);
+        startTourBtn.Click += (_, _) => StartUiTutorial();
+        helpButtonsRow.Controls.AddRange([runWizardBtn, startTourBtn]);
+        setupTable.Controls.Add(helpButtonsRow, 0, sh);
+
         // Card 1: General and Appearance
         var generalCard = CreateResponsiveCard(scroll, out TableLayoutPanel genTable, 1);
         genTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -1440,9 +1535,13 @@ public sealed class DashboardForm : Form
         genTable.Controls.Add(genTitle, 0, gr++);
 
         AddSettingFieldHeader(genTable, ref gr, "Color theme", addTopSpacing: false);
-        var themeCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 280, Margin = new Padding(0, 0, 0, 4) };
+        var themeCombo = new NoWheelComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 280, Margin = new Padding(0, 0, 0, 4) };
         themeCombo.Items.AddRange(["Follow Windows theme *", "Dark (VirusTotal style)", "Light"]);
-        themeCombo.SelectedIndexChanged += (_, _) => UpdateRecommendedStarIndicators();
+        themeCombo.SelectedIndexChanged += (_, _) =>
+        {
+            UpdateRecommendedStarIndicators();
+            MarkSettingsDirty();
+        };
         genTable.Controls.Add(WrapWithRecommendedStar(
             themeCombo,
             "Follow Windows theme",
@@ -1457,7 +1556,11 @@ public sealed class DashboardForm : Form
             AutoSize = true,
             Margin = new Padding(0, 2, 0, 4)
         };
-        startupCheck.CheckedChanged += (_, _) => UpdateRecommendedStarIndicators();
+        startupCheck.CheckedChanged += (_, _) =>
+        {
+            UpdateRecommendedStarIndicators();
+            MarkSettingsDirty();
+        };
         genTable.Controls.Add(WrapWithRecommendedStar(
             startupCheck,
             "Enabled",
@@ -1466,7 +1569,7 @@ public sealed class DashboardForm : Form
         AddSectionDivider(genTable, ref gr);
 
         AddSettingFieldHeader(genTable, ref gr, "Clicking app icon or title", addTopSpacing: false);
-        var brandClickActionCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 280, Margin = new Padding(0, 0, 0, 4) };
+        var brandClickActionCombo = new NoWheelComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 280, Margin = new Padding(0, 0, 0, 4) };
         brandClickActionCombo.Items.AddRange(
         [
             "Open Recent Scans *",
@@ -1476,22 +1579,15 @@ public sealed class DashboardForm : Form
             "Open Settings",
             "Toggle monitoring on/off"
         ]);
-        brandClickActionCombo.SelectedIndexChanged += (_, _) => UpdateRecommendedStarIndicators();
+        brandClickActionCombo.SelectedIndexChanged += (_, _) =>
+        {
+            UpdateRecommendedStarIndicators();
+            ApplyBrandClickActionSelection();
+        };
         genTable.Controls.Add(WrapWithRecommendedStar(
             brandClickActionCombo,
             "Open Recent Scans",
-            () => brandClickActionCombo.SelectedIndex == (int)HeaderBrandClickAction.OpenRecentScans), 0, gr++);
-
-        AddSectionDivider(genTable, ref gr);
-
-        AddSettingFieldHeader(genTable, ref gr, "Setup and Help", addTopSpacing: false);
-        var helpButtonsRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 2, 0, 2) };
-        var runWizardBtn = MakeButton("Run Setup Wizard", ModernButtonVariant.Secondary);
-        runWizardBtn.Click += (_, _) => ShowOnboardingWizard();
-        var startTourBtn = MakeButton("Start UI Tour", ModernButtonVariant.Secondary);
-        startTourBtn.Click += (_, _) => StartUiTutorial();
-        helpButtonsRow.Controls.AddRange([runWizardBtn, startTourBtn]);
-        genTable.Controls.Add(helpButtonsRow, 0, gr++);
+            () => brandClickActionCombo.SelectedIndex == (int)HeaderBrandClickAction.OpenRecentScans), 0, gr);
 
         // Card 2: Updates
         var updatesCard = CreateResponsiveCard(scroll, out TableLayoutPanel updTable, 1);
@@ -1556,7 +1652,7 @@ public sealed class DashboardForm : Form
         AddSectionDivider(updTable, ref ur);
 
         AddSettingFieldHeader(updTable, ref ur, "Automatic updates", addTopSpacing: false);
-        var autoUpdateModeCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 280, Margin = new Padding(0, 0, 0, 4) };
+        var autoUpdateModeCombo = new NoWheelComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 280, Margin = new Padding(0, 0, 0, 4) };
         autoUpdateModeCombo.Items.AddRange(
         [
             "Off (manual checks only)",
@@ -1566,6 +1662,7 @@ public sealed class DashboardForm : Form
         autoUpdateModeCombo.SelectedIndexChanged += (_, _) =>
         {
             UpdateRecommendedStarIndicators();
+            MarkSettingsDirty();
             if (_autoUpdateModeCombo is not null && _updateService.LatestCheckResult is null)
             {
                 RefreshUpdateUiFromLatest();
@@ -1597,6 +1694,7 @@ public sealed class DashboardForm : Form
         AddSettingFieldHeader(vtTable, ref vr, "VirusTotal API Key", addTopSpacing: false);
         var keyRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
         var apiKeyBox = new TextBox { Width = 360, UseSystemPasswordChar = true };
+        apiKeyBox.TextChanged += (_, _) => MarkSettingsDirty();
         var toggleKeyBtn = MakeButton("Show", ModernButtonVariant.Secondary);
         toggleKeyBtn.Click += (_, _) =>
         {
@@ -1618,27 +1716,35 @@ public sealed class DashboardForm : Form
         AddSectionDivider(vtTable, ref vr);
 
         AddSettingFieldHeader(vtTable, ref vr, "When VirusTotal has not seen a file", addTopSpacing: false);
-        var uploadPolicyCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 460 };
+        var uploadPolicyCombo = new NoWheelComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 460 };
         uploadPolicyCombo.Items.AddRange(
         [
             "Auto-upload executables, scripts & installers *",
             "Hash lookup only (never upload files)",
             "Auto-upload all watched files"
         ]);
-        uploadPolicyCombo.SelectedIndexChanged += (_, _) => UpdateRecommendedStarIndicators();
+        uploadPolicyCombo.SelectedIndexChanged += (_, _) =>
+        {
+            UpdateRecommendedStarIndicators();
+            MarkSettingsDirty();
+        };
         vtTable.Controls.Add(WrapWithRecommendedStar(
             uploadPolicyCombo,
             "Auto-upload executables, scripts & installers",
             () => uploadPolicyCombo.SelectedIndex == (int)UploadPolicy.ExecutablesAndScriptsOnly), 0, vr++);
 
         AddSettingFieldHeader(vtTable, ref vr, "Watched file types");
-        var filterModeCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 460 };
+        var filterModeCombo = new NoWheelComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 460 };
         filterModeCombo.Items.AddRange(
         [
             "Executables, scripts, installers & archives *",
             "All file types (uses more API quota)"
         ]);
-        filterModeCombo.SelectedIndexChanged += (_, _) => UpdateRecommendedStarIndicators();
+        filterModeCombo.SelectedIndexChanged += (_, _) =>
+        {
+            UpdateRecommendedStarIndicators();
+            MarkSettingsDirty();
+        };
         vtTable.Controls.Add(WrapWithRecommendedStar(
             filterModeCombo,
             "Executables, scripts, installers & archives",
@@ -1646,7 +1752,11 @@ public sealed class DashboardForm : Form
 
         AddSettingFieldHeader(vtTable, ref vr, "Executable and script extensions");
         var uploadExtBox = new TextBox { Width = 540 };
-        uploadExtBox.TextChanged += (_, _) => UpdateRecommendedStarIndicators();
+        uploadExtBox.TextChanged += (_, _) =>
+        {
+            UpdateRecommendedStarIndicators();
+            MarkSettingsDirty();
+        };
         vtTable.Controls.Add(WrapWithRecommendedStar(
             uploadExtBox,
             "Default executable and script extensions",
@@ -1655,12 +1765,17 @@ public sealed class DashboardForm : Form
         AddSettingFieldHeader(vtTable, ref vr, "Archive and disk image extensions");
         var archPanel = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
         var archiveExtBox = new TextBox { Width = 415 };
-        archiveExtBox.TextChanged += (_, _) => UpdateRecommendedStarIndicators();
+        archiveExtBox.TextChanged += (_, _) =>
+        {
+            UpdateRecommendedStarIndicators();
+            MarkSettingsDirty();
+        };
         var resetExtBtn = MakeButton("Reset Extensions", ModernButtonVariant.Secondary);
         resetExtBtn.Click += (_, _) =>
         {
             uploadExtBox.Text = string.Join(", ", AppSettings.DefaultUploadExtensions);
             archiveExtBox.Text = string.Join(", ", AppSettings.DefaultArchiveExtensions);
+            MarkSettingsDirty();
         };
         archPanel.Controls.AddRange([archiveExtBox, resetExtBtn]);
         vtTable.Controls.Add(WrapWithRecommendedStar(
@@ -1695,6 +1810,7 @@ public sealed class DashboardForm : Form
         {
             UpdateThresholdDescriptionLabel(thresholdDescLabel, val);
             UpdateRecommendedStarIndicators();
+            MarkSettingsDirty();
         };
         thresholdContainer.Controls.Add(WrapWithRecommendedStar(
             thresholdSlider,
@@ -1706,11 +1822,12 @@ public sealed class DashboardForm : Form
         AddSectionDivider(vtTable, ref vr);
 
         AddSettingFieldHeader(vtTable, ref vr, "API rate limit (requests / minute)", addTopSpacing: false);
-        var rateLimitNum = new NumericUpDown { Minimum = 1, Maximum = 1000, Width = 110 };
+        var rateLimitNum = new NoWheelNumericUpDown { Minimum = 1, Maximum = 1000, Width = 110 };
         rateLimitNum.ValueChanged += (_, _) =>
         {
             UpdateVirusTotalLimitWarnings();
             UpdateRecommendedStarIndicators();
+            MarkSettingsDirty();
         };
         vtTable.Controls.Add(WrapWithRecommendedStar(
             rateLimitNum,
@@ -1719,11 +1836,12 @@ public sealed class DashboardForm : Form
         Label rateLimitWarningLabel = AddSettingsHintOrWarningLabel(vtTable, ref vr);
 
         AddSettingFieldHeader(vtTable, ref vr, "Max file size to upload (MB)");
-        var maxUploadNum = new NumericUpDown { Minimum = 1, Maximum = 650, Increment = 16, Width = 110 };
+        var maxUploadNum = new NoWheelNumericUpDown { Minimum = 1, Maximum = 650, Increment = 16, Width = 110 };
         maxUploadNum.ValueChanged += (_, _) =>
         {
             UpdateVirusTotalLimitWarnings();
             UpdateRecommendedStarIndicators();
+            MarkSettingsDirty();
         };
         vtTable.Controls.Add(WrapWithRecommendedStar(
             maxUploadNum,
@@ -1732,11 +1850,12 @@ public sealed class DashboardForm : Form
         Label maxUploadWarningLabel = AddSettingsHintOrWarningLabel(vtTable, ref vr);
 
         AddSettingFieldHeader(vtTable, ref vr, "Max file size to hash (MB, 0 = unlimited)");
-        var maxHashNum = new NumericUpDown { Minimum = 0, Maximum = 50000, Increment = 128, Width = 110 };
+        var maxHashNum = new NoWheelNumericUpDown { Minimum = 0, Maximum = 50000, Increment = 128, Width = 110 };
         maxHashNum.ValueChanged += (_, _) =>
         {
             UpdateVirusTotalLimitWarnings();
             UpdateRecommendedStarIndicators();
+            MarkSettingsDirty();
         };
         vtTable.Controls.Add(WrapWithRecommendedStar(
             maxHashNum,
@@ -1759,7 +1878,11 @@ public sealed class DashboardForm : Form
             AutoSize = true,
             Margin = new Padding(0, 2, 0, 4)
         };
-        lowerRiskOnlyCheck.CheckedChanged += (_, _) => UpdateRecommendedStarIndicators();
+        lowerRiskOnlyCheck.CheckedChanged += (_, _) =>
+        {
+            UpdateRecommendedStarIndicators();
+            MarkSettingsDirty();
+        };
         secTable.Controls.Add(WrapWithRecommendedStar(
             lowerRiskOnlyCheck,
             "Unchecked (all risk levels)",
@@ -1774,7 +1897,11 @@ public sealed class DashboardForm : Form
             AutoSize = true,
             Margin = new Padding(0, 2, 0, 4)
         };
-        enableCirclCheck.CheckedChanged += (_, _) => UpdateRecommendedStarIndicators();
+        enableCirclCheck.CheckedChanged += (_, _) =>
+        {
+            UpdateRecommendedStarIndicators();
+            MarkSettingsDirty();
+        };
         secTable.Controls.Add(WrapWithRecommendedStar(
             enableCirclCheck,
             "Enabled",
@@ -1786,9 +1913,14 @@ public sealed class DashboardForm : Form
         AddSettingFieldHeader(secTable, ref sr, "OPSWAT MetaDefender Cloud", addTopSpacing: false);
         var mdStack = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, Margin = new Padding(0, 2, 0, 4) };
         var enableMdCheck = new CheckBox { Text = "Enable MetaDefender hash lookup (requires free API key)", AutoSize = true };
-        enableMdCheck.CheckedChanged += (_, _) => UpdateRecommendedStarIndicators();
+        enableMdCheck.CheckedChanged += (_, _) =>
+        {
+            UpdateRecommendedStarIndicators();
+            MarkSettingsDirty();
+        };
         var mdKeyRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 6, 0, 2) };
         var mdKeyBox = new TextBox { Width = 360, UseSystemPasswordChar = true };
+        mdKeyBox.TextChanged += (_, _) => MarkSettingsDirty();
         var toggleMdBtn = MakeButton("Show", ModernButtonVariant.Secondary);
         toggleMdBtn.Click += (_, _) =>
         {
@@ -1818,9 +1950,14 @@ public sealed class DashboardForm : Form
         AddSettingFieldHeader(secTable, ref sr, "MalwareBazaar (abuse.ch)", addTopSpacing: false);
         var mbStack = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, Margin = new Padding(0, 2, 0, 2) };
         var enableMbCheck = new CheckBox { Text = "Enable MalwareBazaar threat lookup (requires free Auth-Key)", AutoSize = true };
-        enableMbCheck.CheckedChanged += (_, _) => UpdateRecommendedStarIndicators();
+        enableMbCheck.CheckedChanged += (_, _) =>
+        {
+            UpdateRecommendedStarIndicators();
+            MarkSettingsDirty();
+        };
         var mbKeyRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 6, 0, 2) };
         var mbKeyBox = new TextBox { Width = 360, UseSystemPasswordChar = true };
+        mbKeyBox.TextChanged += (_, _) => MarkSettingsDirty();
         var toggleMbBtn = MakeButton("Show", ModernButtonVariant.Secondary);
         toggleMbBtn.Click += (_, _) =>
         {
@@ -1894,7 +2031,7 @@ public sealed class DashboardForm : Form
         root.Controls.Add(saveBar, 0, 1);
 
         view.Controls.Add(root);
-        return (view, scroll, generalCard, updatesCard, vtCard, secCard, resetCard, saveBar, legendLabel,
+        return (view, scroll, setupHelpCard, generalCard, updatesCard, vtCard, secCard, resetCard, saveBar, legendLabel,
             themeCombo, startupCheck, brandClickActionCombo,
             installedVersionLabel, updateStatusLabel, updateReleaseLink, updateProgressBar,
             checkUpdatesBtn, installUpdateBtn, autoUpdateModeCombo, updateHelperLabel,
@@ -3202,37 +3339,80 @@ public sealed class DashboardForm : Form
 
     private void LoadSettingsIntoControls()
     {
-        AppSettings s = _engine.CurrentSettings;
-        _themeCombo.SelectedIndex = Math.Clamp((int)s.ThemeMode, 0, _themeCombo.Items.Count - 1);
-        _startupCheckBox.Checked = StartupManager.IsStartupEnabled() || s.StartWithWindows;
-        _brandClickActionCombo.SelectedIndex = Math.Clamp((int)s.HeaderBrandClickAction, 0, _brandClickActionCombo.Items.Count - 1);
+        _isLoadingSettings = true;
+        try
+        {
+            AppSettings s = _engine.CurrentSettings;
+            _themeCombo.SelectedIndex = Math.Clamp((int)s.ThemeMode, 0, _themeCombo.Items.Count - 1);
+            _startupCheckBox.Checked = StartupManager.IsStartupEnabled() || s.StartWithWindows;
+            _brandClickActionCombo.SelectedIndex = Math.Clamp((int)s.HeaderBrandClickAction, 0, _brandClickActionCombo.Items.Count - 1);
 
-        _apiKeyTextBox.Text = SettingsStore.GetDecryptedApiKey(s);
-        _uploadPolicyCombo.SelectedIndex = Math.Clamp((int)s.UploadPolicy, 0, _uploadPolicyCombo.Items.Count - 1);
-        _filterModeCombo.SelectedIndex = Math.Clamp((int)s.FilterMode, 0, _filterModeCombo.Items.Count - 1);
-        _uploadExtTextBox.Text = string.Join(", ", s.UploadExtensions);
-        _archiveExtTextBox.Text = string.Join(", ", s.ArchiveExtensions);
-        _thresholdSlider.Value = Math.Clamp(s.MaliciousThreshold, ModernThresholdSlider.MinThreshold, ModernThresholdSlider.MaxThreshold);
-        UpdateThresholdDescriptionLabel(_thresholdDescLabel, _thresholdSlider.Value);
-        _rateLimitNumeric.Value = Math.Clamp(s.MaxRequestsPerMinute, (int)_rateLimitNumeric.Minimum, (int)_rateLimitNumeric.Maximum);
-        _maxUploadMbNumeric.Value = Math.Clamp(s.MaxUploadSizeMb, (int)_maxUploadMbNumeric.Minimum, (int)_maxUploadMbNumeric.Maximum);
-        _maxHashMbNumeric.Value = Math.Clamp(s.MaxHashSizeMb, (int)_maxHashMbNumeric.Minimum, (int)_maxHashMbNumeric.Maximum);
-        UpdateVirusTotalLimitWarnings();
+            _apiKeyTextBox.Text = SettingsStore.GetDecryptedApiKey(s);
+            _uploadPolicyCombo.SelectedIndex = Math.Clamp((int)s.UploadPolicy, 0, _uploadPolicyCombo.Items.Count - 1);
+            _filterModeCombo.SelectedIndex = Math.Clamp((int)s.FilterMode, 0, _filterModeCombo.Items.Count - 1);
+            _uploadExtTextBox.Text = string.Join(", ", s.UploadExtensions);
+            _archiveExtTextBox.Text = string.Join(", ", s.ArchiveExtensions);
+            _thresholdSlider.Value = Math.Clamp(s.MaliciousThreshold, ModernThresholdSlider.MinThreshold, ModernThresholdSlider.MaxThreshold);
+            UpdateThresholdDescriptionLabel(_thresholdDescLabel, _thresholdSlider.Value);
+            _rateLimitNumeric.Value = Math.Clamp(s.MaxRequestsPerMinute, (int)_rateLimitNumeric.Minimum, (int)_rateLimitNumeric.Maximum);
+            _maxUploadMbNumeric.Value = Math.Clamp(s.MaxUploadSizeMb, (int)_maxUploadMbNumeric.Minimum, (int)_maxUploadMbNumeric.Maximum);
+            _maxHashMbNumeric.Value = Math.Clamp(s.MaxHashSizeMb, (int)_maxHashMbNumeric.Minimum, (int)_maxHashMbNumeric.Maximum);
+            UpdateVirusTotalLimitWarnings();
 
-        _secondaryLowerRiskOnlyCheckBox.Checked = s.SecondaryLookupsLowerRiskOnly;
-        _enableCirclCheckBox.Checked = s.EnableCirclHashlookup;
-        _enableMetaDefenderCheckBox.Checked = s.EnableMetaDefender;
-        _metaDefenderKeyBox.Text = SettingsStore.GetDecryptedMetaDefenderApiKey(s);
-        _enableMalwareBazaarCheckBox.Checked = s.EnableMalwareBazaar;
-        _malwareBazaarKeyBox.Text = SettingsStore.GetDecryptedMalwareBazaarApiKey(s);
+            _secondaryLowerRiskOnlyCheckBox.Checked = s.SecondaryLookupsLowerRiskOnly;
+            _enableCirclCheckBox.Checked = s.EnableCirclHashlookup;
+            _enableMetaDefenderCheckBox.Checked = s.EnableMetaDefender;
+            _metaDefenderKeyBox.Text = SettingsStore.GetDecryptedMetaDefenderApiKey(s);
+            _enableMalwareBazaarCheckBox.Checked = s.EnableMalwareBazaar;
+            _malwareBazaarKeyBox.Text = SettingsStore.GetDecryptedMalwareBazaarApiKey(s);
 
-        _autoUpdateModeCombo.SelectedIndex = !s.AutoUpdateEnabled
-            ? 0
-            : s.AutoUpdateCriticalOnly
-                ? 1
-                : 2;
-        UpdateRecommendedStarIndicators();
-        RefreshUpdateUiFromLatest();
+            _autoUpdateModeCombo.SelectedIndex = !s.AutoUpdateEnabled
+                ? 0
+                : s.AutoUpdateCriticalOnly
+                    ? 1
+                    : 2;
+            UpdateRecommendedStarIndicators();
+            RefreshUpdateUiFromLatest();
+        }
+        finally
+        {
+            _isLoadingSettings = false;
+        }
+    }
+
+    private void ApplyBrandClickActionSelection()
+    {
+        if (_isLoadingSettings)
+        {
+            return;
+        }
+
+        AppSettings settings = _engine.CurrentSettings;
+        settings.HeaderBrandClickAction = (HeaderBrandClickAction)Math.Clamp(_brandClickActionCombo.SelectedIndex, 0, 5);
+        _engine.ApplySettings(settings);
+        UpdateHeaderToolTips();
+
+        if (!string.Equals(_saveConfirmLabel.Text, UnsavedChangesText, StringComparison.Ordinal))
+        {
+            _saveConfirmLabel.ForeColor = _palette.SuccessGreen;
+            _saveConfirmLabel.Text = "Header click action updated.";
+        }
+    }
+
+    private void MarkSettingsDirty()
+    {
+        if (_isLoadingSettings)
+        {
+            return;
+        }
+
+        _saveConfirmLabel.ForeColor = _palette.WarningAmber;
+        _saveConfirmLabel.Text = UnsavedChangesText;
+    }
+
+    public void SetBrandClickActionForTest(HeaderBrandClickAction action)
+    {
+        _brandClickActionCombo.SelectedIndex = Math.Clamp((int)action, 0, _brandClickActionCombo.Items.Count - 1);
     }
 
     private void SaveSettingsFromForm()

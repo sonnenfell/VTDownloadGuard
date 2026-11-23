@@ -234,6 +234,7 @@ internal static class Program
             defaults.SecondaryLookupsLowerRiskOnly = true;
             defaults.ThemeMode = AppThemeMode.Dark;
             defaults.OnboardingCompleted = true;
+            defaults.HeaderBrandClickAction = HeaderBrandClickAction.ToggleMonitoring;
 
             defaults.WatchedDirectories.Clear();
             defaults.WatchedDirectories.Add(new WatchedDirectory { Path = expectedDownloads, IncludeSubdirectories = true, Enabled = true });
@@ -248,6 +249,7 @@ internal static class Program
                 "Secondary service flags should persist.");
             Assert(reloaded.ThemeMode == AppThemeMode.Dark, "ThemeMode should persist.");
             Assert(reloaded.OnboardingCompleted, "OnboardingCompleted should persist.");
+            Assert(reloaded.HeaderBrandClickAction == HeaderBrandClickAction.ToggleMonitoring, "HeaderBrandClickAction should persist.");
             Assert(reloaded.WatchedDirectories.Count == 2, "Expected 2 directories after edit.");
             Assert(reloaded.WatchedDirectories.Any(d => d.Path.Equals(@"E:\Mods", StringComparison.OrdinalIgnoreCase)), "Added dir missing.");
 
@@ -1632,13 +1634,26 @@ internal static class Program
                 Assert(darkMetrics.ScanBtnBottom <= darkMetrics.HeaderHeight,
                     $"Header buttons ({darkMetrics.ScanBtnBottom}) must stay within header ({darkMetrics.HeaderHeight}).");
 
-                // Exercise RecommendedStarIndicator toggling
+                // Exercise RecommendedStarIndicator and wheel-safe input controls
                 using (var star = new RecommendedStarIndicator())
                 {
                     Assert(!star.IsAtRecommended, "Star indicator must start false.");
                     star.IsAtRecommended = true;
                     Assert(star.IsAtRecommended, "Star indicator must update to true.");
                     star.ApplyTheme(ThemePalette.Light);
+                }
+
+                using (var combo = new NoWheelComboBox())
+                {
+                    combo.Items.AddRange(["One", "Two"]);
+                    combo.SelectedIndex = 1;
+                    Assert(combo.SelectedIndex == 1, "NoWheelComboBox should support normal selection.");
+                }
+
+                using (var num = new NoWheelNumericUpDown { Minimum = 1, Maximum = 100 })
+                {
+                    num.Value = 42;
+                    Assert(num.Value == 42, "NoWheelNumericUpDown should preserve assigned numeric value.");
                 }
 
                 for (int tab = 0; tab < 5; tab++)
@@ -1650,20 +1665,21 @@ internal static class Program
                 form.Size = new System.Drawing.Size(1180, 760);
                 form.PerformLayout();
 
-                // Verify configurable header brand click and clickable paused subtitle
-                settings.HeaderBrandClickAction = HeaderBrandClickAction.OpenSettings;
-                engine.ApplySettings(settings);
+                // Verify changing brand click dropdown takes effect immediately and persists
                 form.SelectTab(0);
+                form.SetBrandClickActionForTest(HeaderBrandClickAction.OpenSettings);
+                Assert(engine.CurrentSettings.HeaderBrandClickAction == HeaderBrandClickAction.OpenSettings,
+                    "Changing brand click dropdown must immediately update engine settings.");
+                Assert(settingsStore.Load().HeaderBrandClickAction == HeaderBrandClickAction.OpenSettings,
+                    "Changing brand click dropdown must immediately persist to SettingsStore.");
                 form.ExecuteHeaderBrandClick();
                 Assert(form.ActiveTabIndex == 4, $"Expected Settings tab (4), got {form.ActiveTabIndex}.");
 
-                settings.HeaderBrandClickAction = HeaderBrandClickAction.OpenRecentScans;
-                engine.ApplySettings(settings);
+                form.SetBrandClickActionForTest(HeaderBrandClickAction.OpenRecentScans);
                 form.ExecuteHeaderBrandClick();
                 Assert(form.ActiveTabIndex == 0, $"Expected Recent Scans tab (0), got {form.ActiveTabIndex}.");
 
-                settings.HeaderBrandClickAction = HeaderBrandClickAction.ToggleMonitoring;
-                engine.ApplySettings(settings);
+                form.SetBrandClickActionForTest(HeaderBrandClickAction.ToggleMonitoring);
                 Assert(!engine.IsPaused, "Engine should start unpaused.");
                 form.ExecuteHeaderBrandClick();
                 Assert(engine.IsPaused, "Brand click ToggleMonitoring should pause engine.");
