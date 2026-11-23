@@ -21,6 +21,8 @@ It runs quietly in the background with almost zero idle CPU usage, sorts pending
   - Includes an option in Settings to run secondary lookups only on lower-risk files (`Low Risk` and `Likely Safe`).
 - **Queued Tab**: Displays active, queued, and stabilizing files in exact priority order, with controls to move a file to the top, remove items, or clear the queue.
 - **API Tab**: Tracks your local minute rate-limit window, live hourly/daily/monthly quotas pulled directly from the VirusTotal user quota endpoint (`/api/v3/users/{apikey}`), cache hit savings, and per-service secondary lookup counts.
+- **Detection Sensitivity Slider**: Choose how many antivirus vendors must flag a file before it triggers an unsafe alert (default `2+` vendors recommended), with color-coded feedback and clear guidance on false positives versus missed detections.
+- **Guided First-Run Setup and Optional UI Tour**: Automatically discovers and initializes your Windows Downloads directories, suggests detected game folders, helps connect your API keys, and offers an optional spotlight UI tour highlighting key controls (reopenable anytime from the header bar or Settings).
 - **VirusTotal-Inspired Interface**: Clean dashboard with Dark, Light, and Follow Windows themes, verdict and risk pills, live search/filtering, and a matching system tray icon (`Green` = safe, `Blue animated` = checking, `Red` = unsafe file detected, `Gray` = setup needed).
 - **Local Privacy and Security**: All API keys are encrypted locally with Windows DPAPI (`CryptProtectData` scoped to your Windows user account). Files are always checked by SHA-256 hash first; only unknown executables/scripts within your configured size limit (32 MB by default) are uploaded when auto-upload is enabled.
 
@@ -45,11 +47,9 @@ Use this option if you already have the **.NET 10 Desktop Runtime (x64)** instal
 
 ## Quick Start
 
-1. Click the **VTDownloadGuard** icon in the system tray (or open **VTDownloadGuard** from the Start Menu).
-2. Open the **Settings** tab.
-3. Get a free API key from `https://www.virustotal.com/gui/my-apikey`, paste it into **VirusTotal API Key**, click **Test Key**, and click **Save Settings**.
-4. Open the **Directories** tab to add, remove, or toggle watched folders.
-5. (Optional) Under **Secondary Hash Lookup Services** in **Settings**, configure whether secondary services should check all files or only lower-risk files, and optionally enable **OPSWAT MetaDefender** or **MalwareBazaar** with your own free keys.
+1. On first launch, follow the built-in **Setup Wizard** (your Windows Downloads folder is added automatically, common game folders are offered if detected, and you can paste and test your free API key from `https://www.virustotal.com/gui/my-apikey`).
+2. At the end of setup, choose **Finish and Start UI Tour** for a quick interactive walkthrough of the interface, or **Finish Without Tour** to start monitoring immediately.
+3. Anytime later, click the **VTDownloadGuard** icon in the system tray (or open **VTDownloadGuard** from the Start Menu) to view recent scans, inspect the prioritized queue, check live VirusTotal quotas in the **API** tab, adjust the detection threshold slider in **Settings**, or rerun the setup wizard or UI tour.
 
 ## Data Storage Locations
 

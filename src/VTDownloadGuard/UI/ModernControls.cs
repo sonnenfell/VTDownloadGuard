@@ -500,6 +500,272 @@ public sealed class ModernProgressBar : Control
     }
 }
 
+public sealed class ModernThresholdSlider : Control
+{
+    public const int MinThreshold = 1;
+    public const int MaxThreshold = 10;
+    public const int RecommendedThreshold = 2;
+
+    private ThemePalette _palette = ThemePalette.Dark;
+    private int _value = RecommendedThreshold;
+    private bool _dragging;
+
+    public event Action<int>? ValueChanged;
+
+    public ModernThresholdSlider()
+    {
+        DoubleBuffered = true;
+        SetStyle(ControlStyles.Selectable | ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint, true);
+        Size = new Size(460, 74);
+        Cursor = Cursors.Hand;
+        TabStop = true;
+    }
+
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public int Value
+    {
+        get => _value;
+        set
+        {
+            int clamped = Math.Clamp(value, MinThreshold, MaxThreshold);
+            if (_value != clamped)
+            {
+                _value = clamped;
+                Invalidate();
+                ValueChanged?.Invoke(_value);
+            }
+        }
+    }
+
+    public void ApplyTheme(ThemePalette palette)
+    {
+        _palette = palette;
+        Invalidate();
+    }
+
+    public static Color GetThresholdColor(int value, ThemePalette palette)
+    {
+        bool dark = palette.IsDark;
+        return Math.Clamp(value, MinThreshold, MaxThreshold) switch
+        {
+            1 => dark ? Color.FromArgb(129, 140, 248) : Color.FromArgb(79, 70, 229),
+            2 => dark ? Color.FromArgb(34, 197, 94) : Color.FromArgb(22, 163, 74),
+            3 => dark ? Color.FromArgb(20, 184, 166) : Color.FromArgb(13, 148, 136),
+            4 or 5 => dark ? Color.FromArgb(245, 158, 11) : Color.FromArgb(217, 119, 6),
+            6 or 7 => dark ? Color.FromArgb(249, 115, 22) : Color.FromArgb(234, 88, 12),
+            _ => dark ? Color.FromArgb(239, 68, 68) : Color.FromArgb(220, 38, 38)
+        };
+    }
+
+    public static (string Title, string Description) GetThresholdGuidance(int value)
+    {
+        int v = Math.Clamp(value, MinThreshold, MaxThreshold);
+        return v switch
+        {
+            1 => (
+                "1+ vendor (Very strict)",
+                "Very strict. Theoretically the safest option, but realistically causes frequent false detections on indie games, mods, and fresh software updates without any real security benefit."),
+            2 => (
+                "2+ vendors (Recommended)",
+                "Recommended default. Filters out most single-engine false alarms while still alerting you promptly on real threats."),
+            3 => (
+                "3+ vendors (Balanced)",
+                "Balanced. Reduces occasional false positives on unsigned utilities and mods, with a slight chance of missing brand-new threats."),
+            4 => (
+                "4+ vendors (Moderate)",
+                "Moderate. Fewer alerts from aggressive heuristic engines, though newer malware detected by only a few vendors will be logged as Low Risk instead of Unsafe."),
+            5 => (
+                "5+ vendors (Relaxed)",
+                "Relaxed. Only alerts when several antivirus vendors agree. Very few false positives, but newly released or niche malware can slip through."),
+            6 or 7 => (
+                $"{v}+ vendors (Permissive)",
+                "Permissive. Ignores low-consensus warnings. Only recommended if you frequently run unsigned tools and accept a higher risk of missed detections."),
+            _ => (
+                $"{v}+ vendors (Very permissive)",
+                $"Very permissive. Only alerts on widely recognized malware. Risky for everyday downloads, because many active threats are flagged by fewer than {v} vendors at first.")
+        };
+    }
+
+    protected override bool IsInputKey(Keys keyData) =>
+        keyData is Keys.Left or Keys.Right or Keys.Up or Keys.Down or Keys.Home or Keys.End
+        || base.IsInputKey(keyData);
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        switch (e.KeyCode)
+        {
+            case Keys.Left:
+            case Keys.Down:
+                Value--;
+                e.Handled = true;
+                break;
+            case Keys.Right:
+            case Keys.Up:
+                Value++;
+                e.Handled = true;
+                break;
+            case Keys.Home:
+                Value = MinThreshold;
+                e.Handled = true;
+                break;
+            case Keys.End:
+                Value = MaxThreshold;
+                e.Handled = true;
+                break;
+        }
+
+        base.OnKeyDown(e);
+    }
+
+    protected override void OnGotFocus(EventArgs e)
+    {
+        Invalidate();
+        base.OnGotFocus(e);
+    }
+
+    protected override void OnLostFocus(EventArgs e)
+    {
+        Invalidate();
+        base.OnLostFocus(e);
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Left)
+        {
+            Focus();
+            _dragging = true;
+            UpdateValueFromMouseX(e.X);
+        }
+
+        base.OnMouseDown(e);
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        if (_dragging)
+        {
+            UpdateValueFromMouseX(e.X);
+        }
+
+        base.OnMouseMove(e);
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        _dragging = false;
+        base.OnMouseUp(e);
+    }
+
+    private void UpdateValueFromMouseX(int mouseX)
+    {
+        const float padX = 18f;
+        float trackW = Math.Max(40f, Width - padX * 2f);
+        float step = trackW / (MaxThreshold - MinThreshold);
+        int idx = (int)Math.Round((mouseX - padX) / step);
+        Value = Math.Clamp(MinThreshold + idx, MinThreshold, MaxThreshold);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        Graphics g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(Parent?.BackColor ?? _palette.CardBg);
+
+        Color activeColor = GetThresholdColor(_value, _palette);
+        var (title, _) = GetThresholdGuidance(_value);
+
+        using var badgeFont = new Font("Segoe UI Semibold", 8.6f);
+        Size titleSize = TextRenderer.MeasureText(title, badgeFont);
+        var pillRect = new Rectangle(0, 2, Math.Min(Width - 4, titleSize.Width + 18), 22);
+        using (var pillPath = ModernUiGeometry.CreateRoundedRect(pillRect, 11))
+        using (var pillBrush = new SolidBrush(Color.FromArgb(_palette.IsDark ? 42 : 28, activeColor)))
+        {
+            g.FillPath(pillBrush, pillPath);
+        }
+
+        TextRenderer.DrawText(
+            g,
+            title,
+            badgeFont,
+            pillRect,
+            activeColor,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+
+        const float padX = 18f;
+        float trackW = Math.Max(40f, Width - padX * 2f);
+        float step = trackW / (MaxThreshold - MinThreshold);
+        const int trackY = 36;
+        const int trackH = 8;
+
+        var trackRect = new Rectangle((int)padX - 4, trackY, (int)trackW + 8, trackH);
+        using (var trackPath = ModernUiGeometry.CreateRoundedRect(trackRect, trackH / 2))
+        using (var trackBrush = new SolidBrush(_palette.InputBg))
+        using (var trackBorder = new Pen(_palette.Border, 1f))
+        {
+            g.FillPath(trackBrush, trackPath);
+            g.DrawPath(trackBorder, trackPath);
+        }
+
+        float thumbX = padX + (_value - MinThreshold) * step;
+        int fillW = Math.Max(trackH, (int)Math.Round(thumbX - (padX - 4)));
+        var fillRect = new Rectangle((int)padX - 4, trackY, Math.Min(trackRect.Width, fillW), trackH);
+        using (var fillPath = ModernUiGeometry.CreateRoundedRect(fillRect, trackH / 2))
+        using (var fillBrush = new SolidBrush(activeColor))
+        {
+            g.FillPath(fillBrush, fillPath);
+        }
+
+        using var labelFont = new Font("Segoe UI", 8.2f);
+        using var activeLabelFont = new Font("Segoe UI Semibold", 8.5f);
+
+        for (int i = MinThreshold; i <= MaxThreshold; i++)
+        {
+            float cx = padX + (i - MinThreshold) * step;
+            bool isSelected = i == _value;
+            bool isPassed = i < _value;
+
+            if (!isSelected)
+            {
+                Color dotColor = isPassed ? Color.FromArgb(215, 255, 255, 255) : _palette.TextMuted;
+                using var dotBrush = new SolidBrush(dotColor);
+                g.FillEllipse(dotBrush, cx - 2.2f, trackY + trackH / 2f - 2.2f, 4.4f, 4.4f);
+            }
+
+            var numRect = new Rectangle((int)Math.Round(cx - 12), 51, 24, 18);
+            Color numColor = isSelected ? activeColor : _palette.TextSecondary;
+            TextRenderer.DrawText(
+                g,
+                i.ToString(),
+                isSelected ? activeLabelFont : labelFont,
+                numRect,
+                numColor,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+
+            if (i == RecommendedThreshold && !isSelected)
+            {
+                using var recBrush = new SolidBrush(GetThresholdColor(RecommendedThreshold, _palette));
+                g.FillEllipse(recBrush, cx - 2f, 69f, 4f, 4f);
+            }
+        }
+
+        const float thumbRadius = 8.5f;
+        float thumbCenterY = trackY + trackH / 2f;
+        if (Focused)
+        {
+            using var focusPen = new Pen(Color.FromArgb(110, activeColor), 2f);
+            g.DrawEllipse(focusPen, thumbX - thumbRadius - 3, thumbCenterY - thumbRadius - 3, (thumbRadius + 3) * 2, (thumbRadius + 3) * 2);
+        }
+
+        using (var outerBrush = new SolidBrush(activeColor))
+        using (var innerBrush = new SolidBrush(Color.White))
+        {
+            g.FillEllipse(outerBrush, thumbX - thumbRadius, thumbCenterY - thumbRadius, thumbRadius * 2, thumbRadius * 2);
+            g.FillEllipse(innerBrush, thumbX - 3.5f, thumbCenterY - 3.5f, 7f, 7f);
+        }
+    }
+}
+
 public static class ModernGridHelper
 {
     public static void ConfigureGrid(DataGridView grid, ThemePalette palette)

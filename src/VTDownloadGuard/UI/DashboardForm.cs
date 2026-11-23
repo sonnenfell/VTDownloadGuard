@@ -40,7 +40,10 @@ public sealed class DashboardForm : Form
     private readonly Label _subtitleLabel;
     private readonly ModernButton _headerScanBtn;
     private readonly ModernButton _headerPauseBtn;
+    private readonly ModernButton _headerTourBtn;
     private readonly ModernButton _acknowledgeBtn;
+    private TutorialSession? _activeTutorial;
+    private bool _onboardingPromptedThisInstance;
     private readonly ModernNavBar _navBar;
     private readonly Panel _contentHost;
     private readonly Panel _footerPanel;
@@ -128,7 +131,9 @@ public sealed class DashboardForm : Form
     private readonly TextBox _uploadExtTextBox;
     private readonly TextBox _archiveExtTextBox;
     private readonly ModernButton _resetExtBtn;
-    private readonly NumericUpDown _thresholdNumeric;
+    private readonly Panel _thresholdContainer;
+    private readonly ModernThresholdSlider _thresholdSlider;
+    private readonly Label _thresholdDescLabel;
     private readonly NumericUpDown _rateLimitNumeric;
     private readonly NumericUpDown _maxHashMbNumeric;
 
@@ -288,7 +293,10 @@ public sealed class DashboardForm : Form
         _headerPauseBtn = MakeButton("Pause", ModernButtonVariant.Secondary);
         _headerPauseBtn.Click += (_, _) => _engine.SetPaused(!_engine.IsPaused);
 
-        rightHeader.Controls.AddRange([_acknowledgeBtn, _headerScanBtn, _headerPauseBtn]);
+        _headerTourBtn = MakeButton("UI Tour", ModernButtonVariant.Ghost);
+        _headerTourBtn.Click += (_, _) => StartUiTutorial();
+
+        rightHeader.Controls.AddRange([_acknowledgeBtn, _headerScanBtn, _headerPauseBtn, _headerTourBtn]);
 
         headerLayout.Controls.Add(leftHeader, 0, 0);
         headerLayout.Controls.Add(rightHeader, 1, 0);
@@ -381,7 +389,9 @@ public sealed class DashboardForm : Form
             _uploadExtTextBox,
             _archiveExtTextBox,
             _resetExtBtn,
-            _thresholdNumeric,
+            _thresholdContainer,
+            _thresholdSlider,
+            _thresholdDescLabel,
             _rateLimitNumeric,
             _maxHashMbNumeric,
             _secondaryLowerRiskOnlyCheckBox,
@@ -440,14 +450,107 @@ public sealed class DashboardForm : Form
         UpdateApiTimerState();
     }
 
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        if (!_onboardingPromptedThisInstance && !_engine.CurrentSettings.OnboardingCompleted)
+        {
+            _onboardingPromptedThisInstance = true;
+            BeginInvoke(ShowOnboardingWizard);
+        }
+    }
+
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
+        _activeTutorial?.Dispose();
+        _activeTutorial = null;
         _apiLiveTimer.Stop();
         _apiLiveTimer.Dispose();
         _engine.StatusChanged -= OnEngineChanged;
         _engine.QueueChanged -= OnQueueChanged;
         _engine.ScanCompleted -= OnScanCompleted;
         base.OnFormClosed(e);
+    }
+
+    public void ShowOnboardingWizard()
+    {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        _activeTutorial?.Dispose();
+        using var dialog = new OnboardingDialog(_engine, _logger, Icon!);
+        _ = dialog.ShowDialog(this);
+        if (dialog.CompletedSetup)
+        {
+            LoadSettingsIntoControls();
+            ThemePalette resolved = ThemePalette.Resolve(_engine.CurrentSettings.ThemeMode);
+            ApplyTheme(resolved);
+            RefreshAll();
+            if (dialog.StartUiTourRequested)
+            {
+                StartUiTutorial();
+            }
+        }
+    }
+
+    public TutorialSession CreateTutorialSession()
+    {
+        IReadOnlyList<TutorialStep> steps =
+        [
+            new(
+                TabRecentScans,
+                () => _headerPanel,
+                "Status Header and Quick Actions",
+                "Shows your live protection status at a glance. From here you can manually scan any file, pause or resume monitoring, acknowledge alerts, or reopen this tour."),
+            new(
+                TabRecentScans,
+                () => _navBar,
+                "Navigation Tabs",
+                "Switch between Recent Scans, the live Queued priority list, Watched Directories, live API Quotas, and Settings."),
+            new(
+                TabRecentScans,
+                () => _historyGrid,
+                "Recent Scans and Results",
+                "Each scanned file displays its local Risk rating, final Verdict, detection count, and the service that answered it. Double-click any row to open the full online report."),
+            new(
+                TabQueued,
+                () => _queueGrid,
+                "Risk-Prioritized Scan Queue",
+                "Waiting files are sorted automatically so Very High Risk items are checked first. You can move an item to the top, remove it, or clear the queue."),
+            new(
+                TabDirectories,
+                () => _directoriesGrid,
+                "Watched Directories",
+                "Manage which folders VTDownloadGuard monitors automatically. Your Windows Downloads folder is initialized automatically, and you can add or toggle folders anytime."),
+            new(
+                TabApi,
+                () => _vtQuotaCard,
+                "API Quota and Screening Efficiency",
+                "Monitor your live VirusTotal minute rate-limit window along with hourly, daily, and monthly account quotas directly from VirusTotal, plus local cache savings."),
+            new(
+                TabSettings,
+                () => _thresholdContainer,
+                "Detection Sensitivity and API Keys",
+                "Use the color-coded slider to set how many vendors must flag a file before it counts as unsafe, and configure your VirusTotal and optional secondary service keys.",
+                BeforeShow: () => _settingsScrollPanel.ScrollControlIntoView(_thresholdContainer))
+        ];
+
+        return new TutorialSession(this, steps, idx => SelectTab(idx), _palette);
+    }
+
+    public void StartUiTutorial()
+    {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        _activeTutorial?.Dispose();
+        _activeTutorial = CreateTutorialSession();
+        _activeTutorial.Closed += () => _activeTutorial = null;
+        _activeTutorial.Start();
     }
 
     protected override void Dispose(bool disposing)
@@ -1056,7 +1159,9 @@ public sealed class DashboardForm : Form
         TextBox UploadExtBox,
         TextBox ArchiveExtBox,
         ModernButton ResetExtBtn,
-        NumericUpDown ThresholdNum,
+        Panel ThresholdContainer,
+        ModernThresholdSlider ThresholdSlider,
+        Label ThresholdDescLabel,
         NumericUpDown RateLimitNum,
         NumericUpDown MaxHashMbNum,
         CheckBox LowerRiskOnlyCheck,
@@ -1108,9 +1213,18 @@ public sealed class DashboardForm : Form
         {
             Text = "Start automatically minimized to system tray when Windows starts",
             AutoSize = true,
-            Margin = new Padding(0, 6, 0, 2)
+            Margin = new Padding(0, 6, 0, 6)
         };
         genTable.Controls.Add(startupCheck, 1, gr++);
+
+        genTable.Controls.Add(MakeFieldLabel("Setup and Help:", _bodyFont), 0, gr);
+        var helpButtonsRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 2, 0, 2) };
+        var runWizardBtn = MakeButton("Run Setup Wizard", ModernButtonVariant.Secondary);
+        runWizardBtn.Click += (_, _) => ShowOnboardingWizard();
+        var startTourBtn = MakeButton("Start UI Tour", ModernButtonVariant.Secondary);
+        startTourBtn.Click += (_, _) => StartUiTutorial();
+        helpButtonsRow.Controls.AddRange([runWizardBtn, startTourBtn]);
+        genTable.Controls.Add(helpButtonsRow, 1, gr++);
 
         // Card 2: VirusTotal Configuration
         var vtCard = CreateResponsiveCard(scroll, out TableLayoutPanel vtTable, 2);
@@ -1179,9 +1293,30 @@ public sealed class DashboardForm : Form
         archPanel.Controls.AddRange([archiveExtBox, resetExtBtn]);
         vtTable.Controls.Add(archPanel, 1, vr++);
 
-        vtTable.Controls.Add(MakeFieldLabel("Unsafe alert threshold (engines):", _bodyFont), 0, vr);
-        var thresholdNum = new NumericUpDown { Minimum = 1, Maximum = 20, Width = 96 };
-        vtTable.Controls.Add(thresholdNum, 1, vr++);
+        vtTable.Controls.Add(MakeFieldLabel("Unsafe alert threshold (vendors):", _bodyFont), 0, vr);
+        var thresholdContainer = new FlowLayoutPanel
+        {
+            FlowDirection = FlowDirection.TopDown,
+            AutoSize = true,
+            WrapContents = false,
+            Margin = new Padding(0, 4, 0, 8)
+        };
+        var thresholdSlider = new ModernThresholdSlider
+        {
+            Width = 460,
+            Height = 74,
+            Margin = new Padding(0, 0, 0, 4)
+        };
+        var thresholdDescLabel = new Label
+        {
+            AutoSize = true,
+            MaximumSize = new Size(460, 0),
+            Font = _smallFont,
+            Margin = new Padding(2, 0, 0, 0)
+        };
+        thresholdSlider.ValueChanged += val => UpdateThresholdDescriptionLabel(thresholdDescLabel, val);
+        thresholdContainer.Controls.AddRange([thresholdSlider, thresholdDescLabel]);
+        vtTable.Controls.Add(thresholdContainer, 1, vr++);
 
         vtTable.Controls.Add(MakeFieldLabel("API rate limit (requests / minute):", _bodyFont), 0, vr);
         var rateLimitNum = new NumericUpDown { Minimum = 1, Maximum = 1000, Width = 96 };
@@ -1283,7 +1418,8 @@ public sealed class DashboardForm : Form
         view.Controls.Add(root);
         return (view, scroll, generalCard, vtCard, secCard, saveBar, themeCombo, startupCheck,
             apiKeyBox, toggleKeyBtn, testKeyBtn, keyStatusLabel, uploadPolicyCombo, filterModeCombo,
-            uploadExtBox, archiveExtBox, resetExtBtn, thresholdNum, rateLimitNum, maxHashNum,
+            uploadExtBox, archiveExtBox, resetExtBtn, thresholdContainer, thresholdSlider, thresholdDescLabel,
+            rateLimitNum, maxHashNum,
             lowerRiskOnlyCheck, enableCirclCheck, enableMdCheck, mdKeyBox, toggleMdBtn, testMdBtn, mdStatusLabel,
             enableMbCheck, mbKeyBox, toggleMbBtn, testMbBtn, mbStatusLabel, saveBtn, saveConfirmLabel);
     }
@@ -1387,6 +1523,9 @@ public sealed class DashboardForm : Form
             link.ActiveLinkColor = palette.AccentBlueHover;
             link.VisitedLinkColor = palette.AccentBlue;
         }
+
+        _thresholdSlider.ApplyTheme(palette);
+        _thresholdDescLabel.ForeColor = palette.TextSecondary;
 
         ModernGridHelper.ConfigureGrid(_historyGrid, palette);
         ModernGridHelper.ConfigureGrid(_queueGrid, palette);
@@ -2314,7 +2453,8 @@ public sealed class DashboardForm : Form
         _filterModeCombo.SelectedIndex = Math.Clamp((int)s.FilterMode, 0, _filterModeCombo.Items.Count - 1);
         _uploadExtTextBox.Text = string.Join(", ", s.UploadExtensions);
         _archiveExtTextBox.Text = string.Join(", ", s.ArchiveExtensions);
-        _thresholdNumeric.Value = Math.Clamp(s.MaliciousThreshold, (int)_thresholdNumeric.Minimum, (int)_thresholdNumeric.Maximum);
+        _thresholdSlider.Value = Math.Clamp(s.MaliciousThreshold, ModernThresholdSlider.MinThreshold, ModernThresholdSlider.MaxThreshold);
+        UpdateThresholdDescriptionLabel(_thresholdDescLabel, _thresholdSlider.Value);
         _rateLimitNumeric.Value = Math.Clamp(s.MaxRequestsPerMinute, (int)_rateLimitNumeric.Minimum, (int)_rateLimitNumeric.Maximum);
         _maxHashMbNumeric.Value = Math.Clamp(s.MaxHashSizeMb, (int)_maxHashMbNumeric.Minimum, (int)_maxHashMbNumeric.Maximum);
 
@@ -2339,7 +2479,7 @@ public sealed class DashboardForm : Form
             _uploadExtTextBox.Text.Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries));
         settings.ArchiveExtensions = SettingsStore.NormalizeExtensions(
             _archiveExtTextBox.Text.Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries));
-        settings.MaliciousThreshold = (int)_thresholdNumeric.Value;
+        settings.MaliciousThreshold = _thresholdSlider.Value;
         settings.MaxRequestsPerMinute = (int)_rateLimitNumeric.Value;
         settings.MaxHashSizeMb = (int)_maxHashMbNumeric.Value;
 
@@ -2426,6 +2566,12 @@ public sealed class DashboardForm : Form
                 _testMbKeyBtn.Enabled = true;
             }
         }
+    }
+
+    private static void UpdateThresholdDescriptionLabel(Label label, int value)
+    {
+        var (_, desc) = ModernThresholdSlider.GetThresholdGuidance(value);
+        label.Text = desc;
     }
 
     private static string FormatBytes(long bytes)

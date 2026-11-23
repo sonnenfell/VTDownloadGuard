@@ -196,6 +196,7 @@ public sealed class AppSettings
     public bool EnableMalwareBazaar { get; set; } = false;
     public string EncryptedMalwareBazaarApiKey { get; set; } = string.Empty;
     public AppThemeMode ThemeMode { get; set; } = AppThemeMode.System;
+    public bool OnboardingCompleted { get; set; } = false;
 
     public static string GetDefaultDownloadsDirectory()
     {
@@ -226,21 +227,114 @@ public sealed class AppSettings
         return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
     }
 
-    public static AppSettings CreateDefault()
+    public static List<string> GetDefaultDownloadsDirectories()
     {
-        var dirs = new List<WatchedDirectory>
-        {
-            new() { Path = GetDefaultDownloadsDirectory(), IncludeSubdirectories = true, Enabled = true }
-        };
+        var list = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        if (Directory.Exists(@"D:\Games"))
+        void TryAdd(string? path, bool requireExists)
         {
-            dirs.Add(new WatchedDirectory { Path = @"D:\Games", IncludeSubdirectories = true, Enabled = true });
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return;
+            }
+
+            try
+            {
+                string full = Path.GetFullPath(path.Trim());
+                if ((!requireExists || Directory.Exists(full)) && seen.Add(full))
+                {
+                    list.Add(full);
+                }
+            }
+            catch
+            {
+                // Ignore invalid path entries.
+            }
         }
 
-        if (Directory.Exists(@"C:\Games"))
+        TryAdd(GetDefaultDownloadsDirectory(), requireExists: false);
+
+        string userProfileDownloads = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            "Downloads");
+        TryAdd(userProfileDownloads, requireExists: true);
+
+        try
         {
-            dirs.Add(new WatchedDirectory { Path = @"C:\Games", IncludeSubdirectories = true, Enabled = true });
+            foreach (DriveInfo drive in DriveInfo.GetDrives())
+            {
+                if (drive.IsReady && drive.DriveType == DriveType.Fixed)
+                {
+                    TryAdd(Path.Combine(drive.RootDirectory.FullName, "Downloads"), requireExists: true);
+                }
+            }
+        }
+        catch
+        {
+            // Ignore drive enumeration failures.
+        }
+
+        return list;
+    }
+
+    public static List<string> GetSuggestedGameDirectories()
+    {
+        string[] candidates =
+        [
+            @"C:\Games",
+            @"D:\Games",
+            @"E:\Games",
+            @"C:\Program Files (x86)\Steam\steamapps\common",
+            @"D:\SteamLibrary\steamapps\common",
+            @"E:\SteamLibrary\steamapps\common",
+            @"C:\Program Files\Epic Games",
+            @"D:\Epic Games",
+            @"C:\GOG Games",
+            @"D:\GOG Games",
+            @"C:\XboxGames",
+            @"D:\XboxGames"
+        ];
+
+        var list = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string candidate in candidates)
+        {
+            try
+            {
+                if (Directory.Exists(candidate) && seen.Add(candidate))
+                {
+                    list.Add(candidate);
+                }
+            }
+            catch
+            {
+                // Ignore inaccessible drive or directory.
+            }
+        }
+
+        return list;
+    }
+
+    public static AppSettings CreateDefault()
+    {
+        var dirs = new List<WatchedDirectory>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (string dlPath in GetDefaultDownloadsDirectories())
+        {
+            if (seen.Add(dlPath))
+            {
+                dirs.Add(new WatchedDirectory { Path = dlPath, IncludeSubdirectories = true, Enabled = true });
+            }
+        }
+
+        foreach (string gamePath in new[] { @"D:\Games", @"C:\Games" })
+        {
+            if (Directory.Exists(gamePath) && seen.Add(gamePath))
+            {
+                dirs.Add(new WatchedDirectory { Path = gamePath, IncludeSubdirectories = true, Enabled = true });
+            }
         }
 
         return new AppSettings
@@ -261,7 +355,8 @@ public sealed class AppSettings
             EncryptedMetaDefenderApiKey = string.Empty,
             EnableMalwareBazaar = false,
             EncryptedMalwareBazaarApiKey = string.Empty,
-            ThemeMode = AppThemeMode.System
+            ThemeMode = AppThemeMode.System,
+            OnboardingCompleted = false
         };
     }
 
@@ -286,7 +381,8 @@ public sealed class AppSettings
             EncryptedMetaDefenderApiKey = EncryptedMetaDefenderApiKey,
             EnableMalwareBazaar = EnableMalwareBazaar,
             EncryptedMalwareBazaarApiKey = EncryptedMalwareBazaarApiKey,
-            ThemeMode = ThemeMode
+            ThemeMode = ThemeMode,
+            OnboardingCompleted = OnboardingCompleted
         };
     }
 }

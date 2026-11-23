@@ -64,7 +64,8 @@ internal static class Program
             ("Secondary short-circuit end-to-end saves VT quota", TestSecondaryShortCircuitEndToEnd),
             ("ScanEngine + DirectoryWatcherManager + FileStabilizer end-to-end", TestEndToEndScanning),
             ("TrayIconFactory loads AppIcon and renders all status shields", TestTrayIconFactory),
-            ("DashboardForm UI smoke test across Dark/Light themes and all 5 tabs", TestDashboardUiSmoke)
+            ("ModernThresholdSlider guidance, colors, and clean text", TestThresholdSlider),
+            ("DashboardForm, OnboardingDialog, and TutorialSession UI smoke test", TestDashboardUiSmoke)
         };
 
         int failures = 0;
@@ -211,6 +212,11 @@ internal static class Program
             Assert(!defaults.EnableMalwareBazaar, "MalwareBazaar should be disabled by default.");
             Assert(!defaults.SecondaryLookupsLowerRiskOnly, "SecondaryLookupsLowerRiskOnly should be false by default.");
             Assert(defaults.ThemeMode == AppThemeMode.System, "Default ThemeMode should be System.");
+            Assert(!defaults.OnboardingCompleted, "OnboardingCompleted should default to false.");
+
+            List<string> defaultDownloads = AppSettings.GetDefaultDownloadsDirectories();
+            Assert(defaultDownloads.Count >= 1 && defaultDownloads.Contains(expectedDownloads, StringComparer.OrdinalIgnoreCase),
+                "GetDefaultDownloadsDirectories should include primary Downloads directory.");
 
             SettingsStore.SetApiKey(defaults, "my-secret-vt-key");
             SettingsStore.SetMetaDefenderApiKey(defaults, "md-secret-key");
@@ -219,6 +225,7 @@ internal static class Program
             defaults.EnableMalwareBazaar = true;
             defaults.SecondaryLookupsLowerRiskOnly = true;
             defaults.ThemeMode = AppThemeMode.Dark;
+            defaults.OnboardingCompleted = true;
 
             defaults.WatchedDirectories.Clear();
             defaults.WatchedDirectories.Add(new WatchedDirectory { Path = expectedDownloads, IncludeSubdirectories = true, Enabled = true });
@@ -232,8 +239,15 @@ internal static class Program
             Assert(reloaded.EnableMetaDefender && reloaded.EnableMalwareBazaar && reloaded.SecondaryLookupsLowerRiskOnly,
                 "Secondary service flags should persist.");
             Assert(reloaded.ThemeMode == AppThemeMode.Dark, "ThemeMode should persist.");
+            Assert(reloaded.OnboardingCompleted, "OnboardingCompleted should persist.");
             Assert(reloaded.WatchedDirectories.Count == 2, "Expected 2 directories after edit.");
             Assert(reloaded.WatchedDirectories.Any(d => d.Path.Equals(@"E:\Mods", StringComparison.OrdinalIgnoreCase)), "Added dir missing.");
+
+            reloaded.WatchedDirectories.Clear();
+            store.Save(reloaded);
+            AppSettings restored = store.Load();
+            Assert(restored.WatchedDirectories.Any(d => d.Path.Equals(expectedDownloads, StringComparison.OrdinalIgnoreCase)),
+                "Sanitize should restore default Downloads directory when watched list is empty.");
         }
         finally
         {
@@ -1060,6 +1074,33 @@ internal static class Program
         return Task.CompletedTask;
     }
 
+    private static Task TestThresholdSlider()
+    {
+        for (int v = ModernThresholdSlider.MinThreshold; v <= ModernThresholdSlider.MaxThreshold; v++)
+        {
+            var (title, desc) = ModernThresholdSlider.GetThresholdGuidance(v);
+            Assert(!string.IsNullOrWhiteSpace(title), $"Missing slider title for {v}.");
+            Assert(!string.IsNullOrWhiteSpace(desc), $"Missing slider description for {v}.");
+            Assert(!title.Contains('\u2014') && !title.Contains('\u2013'), "Unicode dashes forbidden in slider title.");
+            Assert(!desc.Contains('\u2014') && !desc.Contains('\u2013'), "Unicode dashes forbidden in slider description.");
+        }
+
+        var c1 = ModernThresholdSlider.GetThresholdColor(1, ThemePalette.Dark);
+        var c2 = ModernThresholdSlider.GetThresholdColor(2, ThemePalette.Dark);
+        var c4 = ModernThresholdSlider.GetThresholdColor(4, ThemePalette.Dark);
+        var c6 = ModernThresholdSlider.GetThresholdColor(6, ThemePalette.Dark);
+        var c8 = ModernThresholdSlider.GetThresholdColor(8, ThemePalette.Dark);
+        Assert(c1 != c2 && c2 != c4 && c4 != c6 && c6 != c8, "Slider colors must change across sensitivity ranges.");
+
+        using var slider = new ModernThresholdSlider();
+        Assert(slider.Value == ModernThresholdSlider.RecommendedThreshold, "Default slider value must be 2.");
+        slider.Value = 50;
+        Assert(slider.Value == ModernThresholdSlider.MaxThreshold, "Slider must clamp to max.");
+        slider.Value = 0;
+        Assert(slider.Value == ModernThresholdSlider.MinThreshold, "Slider must clamp to min.");
+        return Task.CompletedTask;
+    }
+
     private static Task TestDashboardUiSmoke()
     {
         string tempDir = CreateTempDir();
@@ -1073,8 +1114,8 @@ internal static class Program
                 var logger = new AppLogger(paths);
                 var settingsStore = new SettingsStore(paths, logger);
                 var settings = AppSettings.CreateDefault();
-                settings.WatchedDirectories.Clear();
                 settings.ThemeMode = AppThemeMode.Dark;
+                settings.OnboardingCompleted = true;
                 settingsStore.Save(settings);
 
                 var history = new HistoryAndCacheStore(paths, logger);
@@ -1108,7 +1149,27 @@ internal static class Program
                     form.PerformLayout();
                 }
 
-                // Switch to Light theme and revisit all tabs
+                // Exercise OnboardingDialog across all 4 steps (Dark)
+                using (var onboardingDark = new OnboardingDialog(engine, logger, icons.AppIcon))
+                {
+                    for (int step = 0; step < 4; step++)
+                    {
+                        onboardingDark.ShowStep(step);
+                        onboardingDark.PerformLayout();
+                    }
+                }
+
+                // Exercise TutorialSession across all 7 spotlight steps
+                using (var tutorial = form.CreateTutorialSession())
+                {
+                    tutorial.Start();
+                    for (int s = 0; s < 6; s++)
+                    {
+                        tutorial.NextStep();
+                    }
+                }
+
+                // Switch to Light theme and revisit Dashboard + Onboarding
                 settings.ThemeMode = AppThemeMode.Light;
                 engine.ApplySettings(settings);
                 using var formLight = new DashboardForm(engine, paths, logger, icons.AppIcon);
@@ -1116,6 +1177,12 @@ internal static class Program
                 {
                     formLight.SelectTab(tab);
                     formLight.PerformLayout();
+                }
+
+                using (var onboardingLight = new OnboardingDialog(engine, logger, icons.AppIcon))
+                {
+                    onboardingLight.ShowStep(1);
+                    onboardingLight.PerformLayout();
                 }
             }
             catch (Exception ex)

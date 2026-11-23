@@ -176,8 +176,16 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         if (openDashboardOnStart)
         {
+            bool needsOnboarding = !_engine.CurrentSettings.OnboardingCompleted;
             bool needsKey = !_engine.HasApiKey;
-            ShowDashboard(needsKey ? SettingsTabIndex : RecentScansTabIndex, focusApiKey: needsKey);
+            if (needsOnboarding)
+            {
+                ShowDashboard(RecentScansTabIndex, focusApiKey: false);
+            }
+            else
+            {
+                ShowDashboard(needsKey ? SettingsTabIndex : RecentScansTabIndex, focusApiKey: needsKey);
+            }
         }
         else if (!_engine.HasApiKey)
         {

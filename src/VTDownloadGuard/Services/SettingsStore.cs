@@ -221,6 +221,31 @@ public sealed class SettingsStore
         return false;
     }
 
+    public static void EnsureDefaultDownloadsIncluded(AppSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        settings.WatchedDirectories ??= [];
+
+        var existing = new HashSet<string>(
+            settings.WatchedDirectories.Select(d => d.Path.Trim()),
+            StringComparer.OrdinalIgnoreCase);
+
+        List<string> defaults = AppSettings.GetDefaultDownloadsDirectories();
+        int insertIndex = 0;
+        foreach (string dlPath in defaults)
+        {
+            if (existing.Add(dlPath))
+            {
+                settings.WatchedDirectories.Insert(insertIndex++, new WatchedDirectory
+                {
+                    Path = dlPath,
+                    IncludeSubdirectories = true,
+                    Enabled = true
+                });
+            }
+        }
+    }
+
     private static void Sanitize(AppSettings settings)
     {
         settings.EncryptedApiKey ??= string.Empty;
@@ -241,6 +266,11 @@ public sealed class SettingsStore
                 };
             })
             .ToList();
+
+        if (settings.WatchedDirectories.Count == 0)
+        {
+            EnsureDefaultDownloadsIncluded(settings);
+        }
 
         settings.UploadExtensions = settings.UploadExtensions is null
             ? [.. AppSettings.DefaultUploadExtensions]
