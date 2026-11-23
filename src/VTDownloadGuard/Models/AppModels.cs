@@ -224,8 +224,8 @@ public sealed class AppSettings
     public string EncryptedMalwareBazaarApiKey { get; set; } = string.Empty;
     public AppThemeMode ThemeMode { get; set; } = AppThemeMode.System;
     public bool OnboardingCompleted { get; set; } = false;
-    public bool AutoUpdateEnabled { get; set; } = false;
-    public bool AutoUpdateCriticalOnly { get; set; } = false;
+    public bool AutoUpdateEnabled { get; set; } = true;
+    public bool AutoUpdateCriticalOnly { get; set; } = true;
     public string UpdateRepository { get; set; } = "sonnenfell/VTDownloadGuard";
 
     public static string GetDefaultDownloadsDirectory()
@@ -387,8 +387,8 @@ public sealed class AppSettings
             EncryptedMalwareBazaarApiKey = string.Empty,
             ThemeMode = AppThemeMode.System,
             OnboardingCompleted = false,
-            AutoUpdateEnabled = false,
-            AutoUpdateCriticalOnly = false,
+            AutoUpdateEnabled = true,
+            AutoUpdateCriticalOnly = true,
             UpdateRepository = "sonnenfell/VTDownloadGuard"
         };
     }

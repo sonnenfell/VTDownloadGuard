@@ -227,7 +227,8 @@ public sealed class TutorialSession : IDisposable
         if (_dashboard.Visible && _dashboard.IsHandleCreated)
         {
             _backdrop.Show(_dashboard);
-            _callout.Show(_backdrop);
+            _callout.Show(_dashboard);
+            _callout.BringToFront();
             _callout.Focus();
         }
     }
@@ -409,10 +410,47 @@ public sealed class TutorialSession : IDisposable
         _dashboard.SizeChanged -= OnDashboardMovedOrResized;
         _dashboard.FormClosed -= OnDashboardClosed;
 
-        _callout.Close();
-        _callout.Dispose();
-        _backdrop.Close();
-        _backdrop.Dispose();
+        bool restoreDashboard = !_dashboard.IsDisposed && _dashboard.IsHandleCreated && _dashboard.Visible;
+        if (restoreDashboard)
+        {
+            _dashboard.Activate();
+        }
+
+        if (!_callout.IsDisposed)
+        {
+            _callout.Owner = null;
+            _callout.Close();
+            _callout.Dispose();
+        }
+
+        if (!_backdrop.IsDisposed)
+        {
+            _backdrop.Owner = null;
+            _backdrop.Close();
+            _backdrop.Dispose();
+        }
+
+        if (restoreDashboard && !_dashboard.IsDisposed)
+        {
+            if (_dashboard.WindowState == FormWindowState.Minimized)
+            {
+                _dashboard.WindowState = FormWindowState.Normal;
+            }
+
+            _dashboard.Activate();
+            _dashboard.BringToFront();
+            if (_dashboard.IsHandleCreated)
+            {
+                _dashboard.BeginInvoke(() =>
+                {
+                    if (!_dashboard.IsDisposed && _dashboard.Visible)
+                    {
+                        _dashboard.Activate();
+                        _dashboard.BringToFront();
+                    }
+                });
+            }
+        }
 
         Closed?.Invoke();
     }

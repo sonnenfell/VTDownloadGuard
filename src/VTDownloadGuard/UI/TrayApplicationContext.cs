@@ -478,11 +478,15 @@ public sealed class TrayApplicationContext : ApplicationContext
         _scanAnimTimer.Stop();
         _scanAnimTimer.Dispose();
 
-        if (_dashboard is not null && !_dashboard.IsDisposed)
+        DashboardForm? dashboard = _dashboard;
+        _dashboard = null;
+        if (dashboard is not null && !dashboard.IsDisposed)
         {
-            _dashboard.Close();
-            _dashboard.Dispose();
-            _dashboard = null;
+            dashboard.Close();
+            if (!dashboard.IsDisposed)
+            {
+                dashboard.Dispose();
+            }
         }
 
         _notifyIcon.Visible = false;

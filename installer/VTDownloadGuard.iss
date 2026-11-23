@@ -1,5 +1,5 @@
 #define MyAppName "VTDownloadGuard"
-#define MyAppVersion "1.2.1"
+#define MyAppVersion "1.2.2"
 #define MyAppPublisher "VTDownloadGuard"
 #define MyAppExeName "VTDownloadGuard.exe"
 

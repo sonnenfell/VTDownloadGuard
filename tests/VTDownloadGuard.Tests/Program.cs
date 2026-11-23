@@ -1153,38 +1153,49 @@ internal static class Program
         Assert(!UpdateService.IsAllowedDownloadUrl("https://evil.example.com/VTDownloadGuard.exe"),
             "Untrusted host must be rejected.");
 
-        var manualSettings = AppSettings.CreateDefault();
-        Assert(!manualSettings.AutoUpdateEnabled && !manualSettings.AutoUpdateCriticalOnly,
-            "Auto-updates must be manual by default.");
+        var defaultUpdateSettings = AppSettings.CreateDefault();
+        Assert(defaultUpdateSettings.AutoUpdateEnabled && defaultUpdateSettings.AutoUpdateCriticalOnly,
+            "Auto-updates must default to critical updates only.");
 
         var normalUpdate = new UpdateCheckResult
         {
             Success = true,
             UpdateAvailable = true,
             IsCritical = false,
-            DownloadUrl = "https://github.com/sonnenfell/VTDownloadGuard/releases/download/v1.2.0/VTDownloadGuard.zip"
+            DownloadUrl = "https://github.com/sonnenfell/VTDownloadGuard/releases/download/v1.2.2/VTDownloadGuard.zip"
         };
         var criticalUpdate = new UpdateCheckResult
         {
             Success = true,
             UpdateAvailable = true,
             IsCritical = true,
-            DownloadUrl = "https://github.com/sonnenfell/VTDownloadGuard/releases/download/v1.2.0/VTDownloadGuard.zip"
+            DownloadUrl = "https://github.com/sonnenfell/VTDownloadGuard/releases/download/v1.2.2/VTDownloadGuard.zip"
         };
 
-        Assert(!UpdateService.ShouldAutoInstall(manualSettings, criticalUpdate),
-            "Manual mode must never auto-install even for critical updates.");
+        // Default: Critical updates only
+        Assert(!UpdateService.ShouldAutoInstall(defaultUpdateSettings, normalUpdate),
+            "Critical-only default must skip non-critical updates.");
+        Assert(UpdateService.ShouldAutoInstall(defaultUpdateSettings, criticalUpdate),
+            "Critical-only default must allow critical updates.");
 
-        manualSettings.AutoUpdateEnabled = true;
-        manualSettings.AutoUpdateCriticalOnly = true;
-        Assert(!UpdateService.ShouldAutoInstall(manualSettings, normalUpdate),
-            "Critical-only mode must skip non-critical updates.");
-        Assert(UpdateService.ShouldAutoInstall(manualSettings, criticalUpdate),
-            "Critical-only mode must allow critical updates.");
+        // Mode: Off (manual checks only)
+        defaultUpdateSettings.AutoUpdateEnabled = false;
+        defaultUpdateSettings.AutoUpdateCriticalOnly = false;
+        Assert(!UpdateService.ShouldAutoInstall(defaultUpdateSettings, normalUpdate),
+            "Off mode must skip normal updates.");
+        Assert(!UpdateService.ShouldAutoInstall(defaultUpdateSettings, criticalUpdate),
+            "Off mode must never auto-install even for critical updates.");
 
-        manualSettings.AutoUpdateCriticalOnly = false;
-        Assert(UpdateService.ShouldAutoInstall(manualSettings, normalUpdate),
-            "Auto-update all mode should allow normal updates.");
+        // Mode: On (all releases)
+        defaultUpdateSettings.AutoUpdateEnabled = true;
+        defaultUpdateSettings.AutoUpdateCriticalOnly = false;
+        Assert(UpdateService.ShouldAutoInstall(defaultUpdateSettings, normalUpdate),
+            "On mode should allow normal updates.");
+        Assert(UpdateService.ShouldAutoInstall(defaultUpdateSettings, criticalUpdate),
+            "On mode should allow critical updates.");
+
+        // Restore critical-only mode for mocked GitHub API check below
+        defaultUpdateSettings.AutoUpdateCriticalOnly = true;
 
         string tempDir = CreateTempDir();
         try
@@ -1235,7 +1246,7 @@ internal static class Program
                 currentVersionOverride: new Version(1, 2, 0),
                 appDirectoryOverride: appDir);
 
-            UpdateCheckResult res = await updateSvc.CheckForUpdatesAsync(manualSettings, CancellationToken.None);
+            UpdateCheckResult res = await updateSvc.CheckForUpdatesAsync(defaultUpdateSettings, CancellationToken.None);
             Assert(res.Success && res.UpdateAvailable && res.IsCritical, "Expected critical update v1.3.0 available.");
             Assert(res.AssetName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase),
                 $"Portable install should prefer .zip asset, got '{res.AssetName}'.");
@@ -1243,7 +1254,7 @@ internal static class Program
 
             // Inno install should select Setup.exe
             File.WriteAllBytes(Path.Combine(appDir, "unins000.exe"), [1, 2, 3]);
-            UpdateCheckResult resInno = await updateSvc.CheckForUpdatesAsync(manualSettings, CancellationToken.None);
+            UpdateCheckResult resInno = await updateSvc.CheckForUpdatesAsync(defaultUpdateSettings, CancellationToken.None);
             Assert(resInno.AssetName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase),
                 $"Inno install should prefer Setup.exe asset, got '{resInno.AssetName}'.");
         }
@@ -1439,8 +1450,8 @@ internal static class Program
         s.EnableCirclHashlookup = false;
         s.EnableMetaDefender = true;
         s.EnableMalwareBazaar = true;
-        s.AutoUpdateEnabled = true;
-        s.AutoUpdateCriticalOnly = true;
+        s.AutoUpdateEnabled = false;
+        s.AutoUpdateCriticalOnly = false;
 
         s.ResetPreferencesToDefaults();
 
@@ -1555,11 +1566,23 @@ internal static class Program
                 Assert(darkMetrics.ScanBtnBottom <= darkMetrics.HeaderHeight,
                     $"Header buttons ({darkMetrics.ScanBtnBottom}) must stay within header ({darkMetrics.HeaderHeight}).");
 
+                // Exercise RecommendedStarIndicator toggling
+                using (var star = new RecommendedStarIndicator())
+                {
+                    Assert(!star.IsAtRecommended, "Star indicator must start false.");
+                    star.IsAtRecommended = true;
+                    Assert(star.IsAtRecommended, "Star indicator must update to true.");
+                    star.ApplyTheme(ThemePalette.Light);
+                }
+
                 for (int tab = 0; tab < 5; tab++)
                 {
                     form.SelectTab(tab);
                     form.PerformLayout();
                 }
+
+                form.Size = new System.Drawing.Size(1180, 760);
+                form.PerformLayout();
 
                 // Exercise OnboardingDialog across all 4 steps (Dark)
                 using (var onboardingDark = new OnboardingDialog(engine, logger, icons.AppIcon))
@@ -1571,7 +1594,7 @@ internal static class Program
                     }
                 }
 
-                // Exercise TutorialSession across all 7 spotlight steps
+                // Exercise TutorialSession across all 7 spotlight steps and ensure closing/skipping preserves form
                 using (var tutorial = form.CreateTutorialSession())
                 {
                     tutorial.Start();
@@ -1580,6 +1603,8 @@ internal static class Program
                         tutorial.NextStep();
                     }
                 }
+
+                Assert(!form.IsDisposed, "Skipping or finishing the UI tour must keep the main Dashboard window open.");
 
                 // Switch to Light theme and revisit Dashboard + Onboarding
                 settings.ThemeMode = AppThemeMode.Light;

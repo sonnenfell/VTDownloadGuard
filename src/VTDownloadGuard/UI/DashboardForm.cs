@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using VTDownloadGuard.Models;
@@ -18,6 +19,11 @@ public sealed class DashboardForm : Form
     private const int TabDirectories = 2;
     private const int TabApi = 3;
     private const int TabSettings = 4;
+    private const int WmSetRedraw = 0x000B;
+    private const int WsExComposited = 0x02000000;
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
     private readonly ScanEngine _engine;
     private readonly AppPaths _paths;
@@ -124,7 +130,9 @@ public sealed class DashboardForm : Form
     private readonly ModernCardPanel _updatesCard;
     private readonly ModernCardPanel _vtSettingsCard;
     private readonly ModernCardPanel _secondarySettingsCard;
+    private readonly ModernCardPanel _resetSettingsCard;
     private readonly Panel _settingsSaveBar;
+    private readonly Label _settingsLegendLabel;
     private readonly ComboBox _themeCombo;
     private readonly CheckBox _startupCheckBox;
     private readonly Label _installedVersionLabel;
@@ -133,12 +141,12 @@ public sealed class DashboardForm : Form
     private readonly ModernProgressBar _updateProgressBar;
     private readonly ModernButton _checkUpdatesBtn;
     private readonly ModernButton _installUpdateBtn;
-    private readonly CheckBox _autoUpdateCheckBox;
-    private readonly CheckBox _autoUpdateCriticalOnlyCheckBox;
+    private readonly ComboBox _autoUpdateModeCombo;
     private readonly Label _updateHelperLabel;
     private string _latestReleaseUrl = string.Empty;
     private bool _updateActionInFlight;
     private bool _resourcesCleanedUp;
+    private bool _isResizing;
     private readonly TextBox _apiKeyTextBox;
     private readonly ModernButton _toggleKeyVisibilityBtn;
     private readonly ModernButton _testKeyBtn;
@@ -179,10 +187,22 @@ public sealed class DashboardForm : Form
     private readonly List<ModernCardPanel> _allCards = [];
     private readonly List<ModernProgressBar> _allProgressBars = [];
     private readonly List<LinkLabel> _allLinks = [];
-    private readonly List<Label> _recommendedBadges = [];
     private readonly List<Panel> _sectionDividers = [];
     private readonly List<Label> _wrappingSettingsLabels = [];
+    private readonly List<(RecommendedStarIndicator Indicator, Func<bool> IsRecommended)> _recommendedIndicators = [];
+    private readonly Dictionary<FlowLayoutPanel, int> _lastCardWidthByHost = [];
     private readonly List<(Control Card, TableLayoutPanel Inner)> _responsiveCards = [];
+    private readonly ToolTip _settingsToolTip = new();
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            CreateParams cp = base.CreateParams;
+            cp.ExStyle |= WsExComposited;
+            return cp;
+        }
+    }
 
     public DashboardForm(
         ScanEngine engine,
@@ -205,6 +225,7 @@ public sealed class DashboardForm : Form
         MinimumSize = new Size(940, 620);
         Size = new Size(1080, 720);
         StartPosition = FormStartPosition.CenterScreen;
+        DoubleBuffered = true;
         Font = _bodyFont;
 
         _apiLiveTimer = new System.Windows.Forms.Timer { Interval = 1000 };
@@ -231,7 +252,7 @@ public sealed class DashboardForm : Form
         Controls.Add(root);
 
         // Top Header Bar
-        _headerPanel = new TableLayoutPanel
+        _headerPanel = new SmoothTableLayoutPanel
         {
             Dock = DockStyle.Fill,
             AutoSize = true,
@@ -437,7 +458,9 @@ public sealed class DashboardForm : Form
             _updatesCard,
             _vtSettingsCard,
             _secondarySettingsCard,
+            _resetSettingsCard,
             _settingsSaveBar,
+            _settingsLegendLabel,
             _themeCombo,
             _startupCheckBox,
             _installedVersionLabel,
@@ -446,8 +469,7 @@ public sealed class DashboardForm : Form
             _updateProgressBar,
             _checkUpdatesBtn,
             _installUpdateBtn,
-            _autoUpdateCheckBox,
-            _autoUpdateCriticalOnlyCheckBox,
+            _autoUpdateModeCombo,
             _updateHelperLabel,
             _apiKeyTextBox,
             _toggleKeyVisibilityBtn,
@@ -663,6 +685,7 @@ public sealed class DashboardForm : Form
         if (disposing)
         {
             CleanupSubscriptionsAndTimers();
+            _settingsToolTip.Dispose();
             _headerTitleFont.Dispose();
             _sectionTitleFont.Dispose();
             _boldFont.Dispose();
@@ -676,6 +699,30 @@ public sealed class DashboardForm : Form
         base.Dispose(disposing);
     }
 
+    protected override void OnResizeBegin(EventArgs e)
+    {
+        _isResizing = true;
+        base.OnResizeBegin(e);
+    }
+
+    protected override void OnResizeEnd(EventArgs e)
+    {
+        base.OnResizeEnd(e);
+        _isResizing = false;
+        UpdateResponsiveCards(_apiScrollPanel, force: true);
+        UpdateResponsiveCards(_settingsScrollPanel, force: true);
+    }
+
+    private static void SetRedraw(Control control, bool enabled)
+    {
+        if (control.IsDisposed || !control.IsHandleCreated)
+        {
+            return;
+        }
+
+        _ = SendMessage(control.Handle, WmSetRedraw, enabled ? 1 : 0, IntPtr.Zero);
+    }
+
     public void SelectTab(int tabIndex, bool focusApiKey = false)
     {
         if (tabIndex < 0 || tabIndex >= _tabViews.Length)
@@ -686,22 +733,46 @@ public sealed class DashboardForm : Form
         _activeTabIndex = tabIndex;
         _navBar.SelectedIndex = tabIndex;
 
-        for (int i = 0; i < _tabViews.Length; i++)
+        SetRedraw(_contentHost, false);
+        _contentHost.SuspendLayout();
+        try
         {
-            _tabViews[i].Visible = i == tabIndex;
+            for (int i = 0; i < _tabViews.Length; i++)
+            {
+                _tabViews[i].Visible = i == tabIndex;
+            }
+
+            if (tabIndex == TabQueued)
+            {
+                RefreshQueueGrid();
+            }
+            else if (tabIndex == TabDirectories)
+            {
+                RefreshDirectoriesGrid();
+            }
+            else if (tabIndex == TabApi)
+            {
+                UpdateResponsiveCards(_apiScrollPanel, force: true);
+                RefreshApiTab();
+            }
+            else if (tabIndex == TabSettings)
+            {
+                UpdateResponsiveCards(_settingsScrollPanel, force: true);
+            }
+        }
+        finally
+        {
+            _contentHost.ResumeLayout(true);
+            SetRedraw(_contentHost, true);
+            if (_contentHost.IsHandleCreated && !_contentHost.IsDisposed)
+            {
+                _contentHost.Invalidate(true);
+                _contentHost.Update();
+            }
         }
 
-        if (tabIndex == TabQueued)
+        if (tabIndex == TabApi)
         {
-            RefreshQueueGrid();
-        }
-        else if (tabIndex == TabDirectories)
-        {
-            RefreshDirectoriesGrid();
-        }
-        else if (tabIndex == TabApi)
-        {
-            RefreshApiTab();
             MaybeAutoFetchQuota();
         }
 
@@ -1109,7 +1180,7 @@ public sealed class DashboardForm : Form
         DataGridView SecondaryGrid) BuildApiTab()
     {
         var view = new Panel { Dock = DockStyle.Fill };
-        var scroll = new FlowLayoutPanel
+        var scroll = new SmoothFlowLayoutPanel
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.TopDown,
@@ -1245,7 +1316,9 @@ public sealed class DashboardForm : Form
         ModernCardPanel UpdatesCard,
         ModernCardPanel VtCard,
         ModernCardPanel SecondaryCard,
+        ModernCardPanel ResetCard,
         Panel SaveBar,
+        Label LegendLabel,
         ComboBox ThemeCombo,
         CheckBox StartupCheckBox,
         Label InstalledVersionLabel,
@@ -1254,8 +1327,7 @@ public sealed class DashboardForm : Form
         ModernProgressBar UpdateProgressBar,
         ModernButton CheckUpdatesBtn,
         ModernButton InstallUpdateBtn,
-        CheckBox AutoUpdateCheckBox,
-        CheckBox AutoUpdateCriticalOnlyCheckBox,
+        ComboBox AutoUpdateModeCombo,
         Label UpdateHelperLabel,
         TextBox ApiKeyBox,
         ModernButton ToggleKeyBtn,
@@ -1292,11 +1364,11 @@ public sealed class DashboardForm : Form
         Label SaveConfirmLabel) BuildSettingsTab()
     {
         var view = new Panel { Dock = DockStyle.Fill };
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+        var root = new SmoothTableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
-        var scroll = new FlowLayoutPanel
+        var scroll = new SmoothFlowLayoutPanel
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.TopDown,
@@ -1304,6 +1376,18 @@ public sealed class DashboardForm : Form
             AutoScroll = true,
             Padding = new Padding(2, 2, 10, 12)
         };
+
+        var legendLabel = new Label
+        {
+            Text = "* Marks the recommended choice in dropdowns. A star beside a setting means it is currently at its recommended value.",
+            AutoSize = true,
+            MaximumSize = new Size(760, 0),
+            Font = _smallFont,
+            Margin = new Padding(4, 0, 0, 10),
+            Tag = "SettingsLegend"
+        };
+        _wrappingSettingsLabels.Add(legendLabel);
+        scroll.Controls.Add(legendLabel);
 
         // Card 1: General and Appearance
         var generalCard = CreateResponsiveCard(scroll, out TableLayoutPanel genTable, 1);
@@ -1313,21 +1397,29 @@ public sealed class DashboardForm : Form
         var genTitle = new Label { Text = "General and Appearance", Font = _sectionTitleFont, AutoSize = true, Margin = new Padding(0, 0, 0, 10) };
         genTable.Controls.Add(genTitle, 0, gr++);
 
-        AddSettingFieldHeader(genTable, ref gr, "Color theme", "Follow Windows theme", addTopSpacing: false);
+        AddSettingFieldHeader(genTable, ref gr, "Color theme", addTopSpacing: false);
         var themeCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 280, Margin = new Padding(0, 0, 0, 4) };
-        themeCombo.Items.AddRange(["Follow Windows theme (Recommended)", "Dark (VirusTotal style)", "Light"]);
-        genTable.Controls.Add(themeCombo, 0, gr++);
+        themeCombo.Items.AddRange(["Follow Windows theme *", "Dark (VirusTotal style)", "Light"]);
+        themeCombo.SelectedIndexChanged += (_, _) => UpdateRecommendedStarIndicators();
+        genTable.Controls.Add(WrapWithRecommendedStar(
+            themeCombo,
+            "Follow Windows theme",
+            () => themeCombo.SelectedIndex == (int)AppThemeMode.System), 0, gr++);
 
         AddSectionDivider(genTable, ref gr);
 
-        AddSettingFieldHeader(genTable, ref gr, "Windows startup", "Enabled", addTopSpacing: false);
+        AddSettingFieldHeader(genTable, ref gr, "Windows startup", addTopSpacing: false);
         var startupCheck = new CheckBox
         {
             Text = "Start automatically minimized to system tray when Windows starts",
             AutoSize = true,
             Margin = new Padding(0, 2, 0, 4)
         };
-        genTable.Controls.Add(startupCheck, 0, gr++);
+        startupCheck.CheckedChanged += (_, _) => UpdateRecommendedStarIndicators();
+        genTable.Controls.Add(WrapWithRecommendedStar(
+            startupCheck,
+            "Enabled",
+            () => startupCheck.Checked), 0, gr++);
 
         AddSectionDivider(genTable, ref gr);
 
@@ -1364,7 +1456,7 @@ public sealed class DashboardForm : Form
         var statusRow = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Margin = new Padding(0, 0, 0, 4) };
         var updateStatusLabel = new Label
         {
-            Text = "Manual checks enabled (default). Click Check for Updates to query GitHub.",
+            Text = "Click Check for Updates to query GitHub for new releases.",
             AutoSize = true,
             MaximumSize = new Size(680, 0),
             Margin = new Padding(0, 2, 12, 0)
@@ -1402,34 +1494,36 @@ public sealed class DashboardForm : Form
 
         AddSectionDivider(updTable, ref ur);
 
-        AddSettingFieldHeader(updTable, ref ur, "Automatic updates", "Off (manual checks)", addTopSpacing: false);
-        var autoStack = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, Margin = new Padding(0, 2, 0, 2) };
-        var autoUpdateCheckBox = new CheckBox
+        AddSettingFieldHeader(updTable, ref ur, "Automatic updates", addTopSpacing: false);
+        var autoUpdateModeCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 280, Margin = new Padding(0, 0, 0, 4) };
+        autoUpdateModeCombo.Items.AddRange(
+        [
+            "Off (manual checks only)",
+            "Critical updates only *",
+            "On (all releases)"
+        ]);
+        autoUpdateModeCombo.SelectedIndexChanged += (_, _) =>
         {
-            Text = "Enable automatic update checks and installation",
-            AutoSize = true,
-            Margin = new Padding(0, 2, 0, 4)
+            UpdateRecommendedStarIndicators();
+            if (_autoUpdateModeCombo is not null && _updateService.LatestCheckResult is null)
+            {
+                RefreshUpdateUiFromLatest();
+            }
         };
-        var autoCriticalOnlyCheckBox = new CheckBox
-        {
-            Text = "Only automatically install updates marked as critical",
-            AutoSize = true,
-            Margin = new Padding(20, 0, 0, 6)
-        };
-        autoUpdateCheckBox.CheckedChanged += (_, _) =>
-        {
-            autoCriticalOnlyCheckBox.Enabled = autoUpdateCheckBox.Checked;
-        };
+        updTable.Controls.Add(WrapWithRecommendedStar(
+            autoUpdateModeCombo,
+            "Critical updates only",
+            () => autoUpdateModeCombo.SelectedIndex == 1), 0, ur++);
+
         var updateHelperLabel = new Label
         {
             Text = $"Critical updates are indicated by {UpdateService.CriticalReleaseMarker} on the first line of the GitHub release notes. Settings, directories, and scan history are backed up and preserved during updates.",
             AutoSize = true,
             MaximumSize = new Size(680, 0),
             Font = _smallFont,
-            Margin = new Padding(0, 2, 0, 2)
+            Margin = new Padding(0, 4, 0, 2)
         };
-        autoStack.Controls.AddRange([autoUpdateCheckBox, autoCriticalOnlyCheckBox, updateHelperLabel]);
-        updTable.Controls.Add(autoStack, 0, ur++);
+        updTable.Controls.Add(updateHelperLabel, 0, ur++);
 
         // Card 3: VirusTotal Configuration
         var vtCard = CreateResponsiveCard(scroll, out TableLayoutPanel vtTable, 1);
@@ -1462,32 +1556,45 @@ public sealed class DashboardForm : Form
 
         AddSectionDivider(vtTable, ref vr);
 
-        AddSettingFieldHeader(vtTable, ref vr, "When VirusTotal has not seen a file", "Auto-upload executables, scripts & installers", addTopSpacing: false);
+        AddSettingFieldHeader(vtTable, ref vr, "When VirusTotal has not seen a file", addTopSpacing: false);
         var uploadPolicyCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 460 };
         uploadPolicyCombo.Items.AddRange(
         [
-            "Auto-upload executables, scripts & installers (Recommended)",
+            "Auto-upload executables, scripts & installers *",
             "Hash lookup only (never upload files)",
             "Auto-upload all watched files"
         ]);
-        vtTable.Controls.Add(uploadPolicyCombo, 0, vr++);
+        uploadPolicyCombo.SelectedIndexChanged += (_, _) => UpdateRecommendedStarIndicators();
+        vtTable.Controls.Add(WrapWithRecommendedStar(
+            uploadPolicyCombo,
+            "Auto-upload executables, scripts & installers",
+            () => uploadPolicyCombo.SelectedIndex == (int)UploadPolicy.ExecutablesAndScriptsOnly), 0, vr++);
 
-        AddSettingFieldHeader(vtTable, ref vr, "Watched file types", "Executables, scripts, installers & archives");
+        AddSettingFieldHeader(vtTable, ref vr, "Watched file types");
         var filterModeCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 460 };
         filterModeCombo.Items.AddRange(
         [
-            "Executables, scripts, installers & archives (Recommended)",
+            "Executables, scripts, installers & archives *",
             "All file types (uses more API quota)"
         ]);
-        vtTable.Controls.Add(filterModeCombo, 0, vr++);
+        filterModeCombo.SelectedIndexChanged += (_, _) => UpdateRecommendedStarIndicators();
+        vtTable.Controls.Add(WrapWithRecommendedStar(
+            filterModeCombo,
+            "Executables, scripts, installers & archives",
+            () => filterModeCombo.SelectedIndex == (int)FileFilterMode.ExecutablesScriptsAndArchives), 0, vr++);
 
-        AddSettingFieldHeader(vtTable, ref vr, "Executable and script extensions", "Default list");
+        AddSettingFieldHeader(vtTable, ref vr, "Executable and script extensions");
         var uploadExtBox = new TextBox { Width = 540 };
-        vtTable.Controls.Add(uploadExtBox, 0, vr++);
+        uploadExtBox.TextChanged += (_, _) => UpdateRecommendedStarIndicators();
+        vtTable.Controls.Add(WrapWithRecommendedStar(
+            uploadExtBox,
+            "Default executable and script extensions",
+            () => ExtensionsMatchDefaults(uploadExtBox.Text, AppSettings.DefaultUploadExtensions)), 0, vr++);
 
-        AddSettingFieldHeader(vtTable, ref vr, "Archive and disk image extensions", "Default list");
+        AddSettingFieldHeader(vtTable, ref vr, "Archive and disk image extensions");
         var archPanel = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
         var archiveExtBox = new TextBox { Width = 415 };
+        archiveExtBox.TextChanged += (_, _) => UpdateRecommendedStarIndicators();
         var resetExtBtn = MakeButton("Reset Extensions", ModernButtonVariant.Secondary);
         resetExtBtn.Click += (_, _) =>
         {
@@ -1495,11 +1602,14 @@ public sealed class DashboardForm : Form
             archiveExtBox.Text = string.Join(", ", AppSettings.DefaultArchiveExtensions);
         };
         archPanel.Controls.AddRange([archiveExtBox, resetExtBtn]);
-        vtTable.Controls.Add(archPanel, 0, vr++);
+        vtTable.Controls.Add(WrapWithRecommendedStar(
+            archPanel,
+            "Default archive and disk image extensions",
+            () => ExtensionsMatchDefaults(archiveExtBox.Text, AppSettings.DefaultArchiveExtensions)), 0, vr++);
 
         AddSectionDivider(vtTable, ref vr);
 
-        AddSettingFieldHeader(vtTable, ref vr, "Unsafe alert threshold (vendors)", "2+ vendors", addTopSpacing: false);
+        AddSettingFieldHeader(vtTable, ref vr, "Unsafe alert threshold (vendors)", addTopSpacing: false);
         var thresholdContainer = new FlowLayoutPanel
         {
             FlowDirection = FlowDirection.TopDown,
@@ -1520,28 +1630,57 @@ public sealed class DashboardForm : Form
             Font = _smallFont,
             Margin = new Padding(2, 0, 0, 0)
         };
-        thresholdSlider.ValueChanged += val => UpdateThresholdDescriptionLabel(thresholdDescLabel, val);
-        thresholdContainer.Controls.AddRange([thresholdSlider, thresholdDescLabel]);
+        thresholdSlider.ValueChanged += val =>
+        {
+            UpdateThresholdDescriptionLabel(thresholdDescLabel, val);
+            UpdateRecommendedStarIndicators();
+        };
+        thresholdContainer.Controls.Add(WrapWithRecommendedStar(
+            thresholdSlider,
+            "2+ vendors",
+            () => thresholdSlider.Value == ModernThresholdSlider.RecommendedThreshold));
+        thresholdContainer.Controls.Add(thresholdDescLabel);
         vtTable.Controls.Add(thresholdContainer, 0, vr++);
 
         AddSectionDivider(vtTable, ref vr);
 
-        AddSettingFieldHeader(vtTable, ref vr, "API rate limit (requests / minute)", "4 (Free API limit)", addTopSpacing: false);
+        AddSettingFieldHeader(vtTable, ref vr, "API rate limit (requests / minute)", addTopSpacing: false);
         var rateLimitNum = new NumericUpDown { Minimum = 1, Maximum = 1000, Width = 110 };
-        rateLimitNum.ValueChanged += (_, _) => UpdateVirusTotalLimitWarnings();
-        vtTable.Controls.Add(rateLimitNum, 0, vr++);
+        rateLimitNum.ValueChanged += (_, _) =>
+        {
+            UpdateVirusTotalLimitWarnings();
+            UpdateRecommendedStarIndicators();
+        };
+        vtTable.Controls.Add(WrapWithRecommendedStar(
+            rateLimitNum,
+            "4 requests/minute (Free API limit)",
+            () => (int)rateLimitNum.Value == 4), 0, vr++);
         Label rateLimitWarningLabel = AddSettingsHintOrWarningLabel(vtTable, ref vr);
 
-        AddSettingFieldHeader(vtTable, ref vr, "Max file size to upload (MB)", "32 MB (Free API direct limit)");
+        AddSettingFieldHeader(vtTable, ref vr, "Max file size to upload (MB)");
         var maxUploadNum = new NumericUpDown { Minimum = 1, Maximum = 650, Increment = 16, Width = 110 };
-        maxUploadNum.ValueChanged += (_, _) => UpdateVirusTotalLimitWarnings();
-        vtTable.Controls.Add(maxUploadNum, 0, vr++);
+        maxUploadNum.ValueChanged += (_, _) =>
+        {
+            UpdateVirusTotalLimitWarnings();
+            UpdateRecommendedStarIndicators();
+        };
+        vtTable.Controls.Add(WrapWithRecommendedStar(
+            maxUploadNum,
+            "32 MB (Free API direct upload limit)",
+            () => (int)maxUploadNum.Value == 32), 0, vr++);
         Label maxUploadWarningLabel = AddSettingsHintOrWarningLabel(vtTable, ref vr);
 
-        AddSettingFieldHeader(vtTable, ref vr, "Max file size to hash (MB, 0 = unlimited)", "2048 MB");
+        AddSettingFieldHeader(vtTable, ref vr, "Max file size to hash (MB, 0 = unlimited)");
         var maxHashNum = new NumericUpDown { Minimum = 0, Maximum = 50000, Increment = 128, Width = 110 };
-        maxHashNum.ValueChanged += (_, _) => UpdateVirusTotalLimitWarnings();
-        vtTable.Controls.Add(maxHashNum, 0, vr++);
+        maxHashNum.ValueChanged += (_, _) =>
+        {
+            UpdateVirusTotalLimitWarnings();
+            UpdateRecommendedStarIndicators();
+        };
+        vtTable.Controls.Add(WrapWithRecommendedStar(
+            maxHashNum,
+            "2048 MB",
+            () => (int)maxHashNum.Value == 2048), 0, vr++);
         Label maxHashWarningLabel = AddSettingsHintOrWarningLabel(vtTable, ref vr);
 
         // Card 4: Secondary Hash Lookup Services
@@ -1552,32 +1691,41 @@ public sealed class DashboardForm : Form
         var secTitle = new Label { Text = "Secondary Hash Lookup Services", Font = _sectionTitleFont, AutoSize = true, Margin = new Padding(0, 0, 0, 10) };
         secTable.Controls.Add(secTitle, 0, sr++);
 
-        AddSettingFieldHeader(secTable, ref sr, "Screening scope", "Off (all risk levels)", addTopSpacing: false);
+        AddSettingFieldHeader(secTable, ref sr, "Screening scope", addTopSpacing: false);
         var lowerRiskOnlyCheck = new CheckBox
         {
             Text = "Only use secondary services for lower-risk files (Low Risk and Likely Safe)",
             AutoSize = true,
             Margin = new Padding(0, 2, 0, 4)
         };
-        secTable.Controls.Add(lowerRiskOnlyCheck, 0, sr++);
+        lowerRiskOnlyCheck.CheckedChanged += (_, _) => UpdateRecommendedStarIndicators();
+        secTable.Controls.Add(WrapWithRecommendedStar(
+            lowerRiskOnlyCheck,
+            "Unchecked (all risk levels)",
+            () => !lowerRiskOnlyCheck.Checked), 0, sr++);
 
         AddSectionDivider(secTable, ref sr);
 
-        AddSettingFieldHeader(secTable, ref sr, "CIRCL Hashlookup (NSRL)", "Enabled", addTopSpacing: false);
+        AddSettingFieldHeader(secTable, ref sr, "CIRCL Hashlookup (NSRL)", addTopSpacing: false);
         var enableCirclCheck = new CheckBox
         {
             Text = "Enable CIRCL Hashlookup (free NIST NSRL known-good database, no API key required)",
             AutoSize = true,
             Margin = new Padding(0, 2, 0, 4)
         };
-        secTable.Controls.Add(enableCirclCheck, 0, sr++);
+        enableCirclCheck.CheckedChanged += (_, _) => UpdateRecommendedStarIndicators();
+        secTable.Controls.Add(WrapWithRecommendedStar(
+            enableCirclCheck,
+            "Enabled",
+            () => enableCirclCheck.Checked), 0, sr++);
 
         AddSectionDivider(secTable, ref sr);
 
         // OPSWAT MetaDefender
-        AddSettingFieldHeader(secTable, ref sr, "OPSWAT MetaDefender Cloud", "Disabled unless API key provided", addTopSpacing: false);
+        AddSettingFieldHeader(secTable, ref sr, "OPSWAT MetaDefender Cloud", addTopSpacing: false);
         var mdStack = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, Margin = new Padding(0, 2, 0, 4) };
         var enableMdCheck = new CheckBox { Text = "Enable MetaDefender hash lookup (requires free API key)", AutoSize = true };
+        enableMdCheck.CheckedChanged += (_, _) => UpdateRecommendedStarIndicators();
         var mdKeyRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 6, 0, 2) };
         var mdKeyBox = new TextBox { Width = 360, UseSystemPasswordChar = true };
         var toggleMdBtn = MakeButton("Show", ModernButtonVariant.Secondary);
@@ -1595,15 +1743,21 @@ public sealed class DashboardForm : Form
         mdLink.Margin = new Padding(0, 2, 16, 0);
         var mdStatusLabel = new Label { AutoSize = true, Font = _smallFont, Margin = new Padding(0, 2, 0, 0) };
         mdInfoRow.Controls.AddRange([mdLink, mdStatusLabel]);
-        mdStack.Controls.AddRange([enableMdCheck, mdKeyRow, mdInfoRow]);
+        mdStack.Controls.Add(WrapWithRecommendedStar(
+            enableMdCheck,
+            "Disabled unless you have a free MetaDefender API key",
+            () => !enableMdCheck.Checked));
+        mdStack.Controls.Add(mdKeyRow);
+        mdStack.Controls.Add(mdInfoRow);
         secTable.Controls.Add(mdStack, 0, sr++);
 
         AddSectionDivider(secTable, ref sr);
 
         // MalwareBazaar
-        AddSettingFieldHeader(secTable, ref sr, "MalwareBazaar (abuse.ch)", "Disabled unless Auth-Key provided", addTopSpacing: false);
+        AddSettingFieldHeader(secTable, ref sr, "MalwareBazaar (abuse.ch)", addTopSpacing: false);
         var mbStack = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, Margin = new Padding(0, 2, 0, 2) };
         var enableMbCheck = new CheckBox { Text = "Enable MalwareBazaar threat lookup (requires free Auth-Key)", AutoSize = true };
+        enableMbCheck.CheckedChanged += (_, _) => UpdateRecommendedStarIndicators();
         var mbKeyRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 6, 0, 2) };
         var mbKeyBox = new TextBox { Width = 360, UseSystemPasswordChar = true };
         var toggleMbBtn = MakeButton("Show", ModernButtonVariant.Secondary);
@@ -1621,8 +1775,36 @@ public sealed class DashboardForm : Form
         mbLink.Margin = new Padding(0, 2, 16, 0);
         var mbStatusLabel = new Label { AutoSize = true, Font = _smallFont, Margin = new Padding(0, 2, 0, 0) };
         mbInfoRow.Controls.AddRange([mbLink, mbStatusLabel]);
-        mbStack.Controls.AddRange([enableMbCheck, mbKeyRow, mbInfoRow]);
+        mbStack.Controls.Add(WrapWithRecommendedStar(
+            enableMbCheck,
+            "Disabled unless you have a free MalwareBazaar Auth-Key",
+            () => !enableMbCheck.Checked));
+        mbStack.Controls.Add(mbKeyRow);
+        mbStack.Controls.Add(mbInfoRow);
         secTable.Controls.Add(mbStack, 0, sr);
+
+        // Card 5: Reset Settings (at bottom of settings menu)
+        var resetCard = CreateResponsiveCard(scroll, out TableLayoutPanel resetTable, 1);
+        resetTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+        int rr = 0;
+        var resetTitle = new Label { Text = "Reset Settings", Font = _sectionTitleFont, AutoSize = true, Margin = new Padding(0, 0, 0, 6) };
+        resetTable.Controls.Add(resetTitle, 0, rr++);
+
+        var resetDescLabel = new Label
+        {
+            Text = "Restore all settings above to their recommended defaults. Your saved API keys and watched directories will be kept.",
+            AutoSize = true,
+            MaximumSize = new Size(680, 0),
+            Font = _smallFont,
+            Margin = new Padding(0, 0, 0, 10)
+        };
+        _wrappingSettingsLabels.Add(resetDescLabel);
+        resetTable.Controls.Add(resetDescLabel, 0, rr++);
+
+        var resetDefaultsBtn = MakeButton("Reset Settings to Defaults", ModernButtonVariant.Secondary);
+        resetDefaultsBtn.Click += (_, _) => ResetSettingsToDefaults();
+        resetTable.Controls.Add(resetDefaultsBtn, 0, rr);
 
         scroll.SizeChanged += (_, _) => UpdateResponsiveCards(scroll);
         root.Controls.Add(scroll, 0, 0);
@@ -1645,17 +1827,16 @@ public sealed class DashboardForm : Form
         };
         var saveBtn = MakeButton("Save Settings", ModernButtonVariant.Primary);
         saveBtn.Click += (_, _) => SaveSettingsFromForm();
-        var resetDefaultsBtn = MakeButton("Reset to Defaults", ModernButtonVariant.Secondary);
-        resetDefaultsBtn.Click += (_, _) => ResetSettingsToDefaults();
         var saveConfirmLabel = new Label { AutoSize = true, Font = _boldFont, Margin = new Padding(10, 8, 0, 0) };
-        saveRow.Controls.AddRange([saveBtn, resetDefaultsBtn, saveConfirmLabel]);
+        saveRow.Controls.AddRange([saveBtn, saveConfirmLabel]);
         saveBar.Controls.Add(saveRow);
         root.Controls.Add(saveBar, 0, 1);
 
         view.Controls.Add(root);
-        return (view, scroll, generalCard, updatesCard, vtCard, secCard, saveBar, themeCombo, startupCheck,
+        return (view, scroll, generalCard, updatesCard, vtCard, secCard, resetCard, saveBar, legendLabel,
+            themeCombo, startupCheck,
             installedVersionLabel, updateStatusLabel, updateReleaseLink, updateProgressBar,
-            checkUpdatesBtn, installUpdateBtn, autoUpdateCheckBox, autoCriticalOnlyCheckBox, updateHelperLabel,
+            checkUpdatesBtn, installUpdateBtn, autoUpdateModeCombo, updateHelperLabel,
             apiKeyBox, toggleKeyBtn, testKeyBtn, keyStatusLabel, uploadPolicyCombo, filterModeCombo,
             uploadExtBox, archiveExtBox, resetExtBtn, thresholdContainer, thresholdSlider, thresholdDescLabel,
             rateLimitNum, maxUploadNum, maxHashNum, rateLimitWarningLabel, maxUploadWarningLabel, maxHashWarningLabel,
@@ -1663,50 +1844,57 @@ public sealed class DashboardForm : Form
             enableMbCheck, mbKeyBox, toggleMbBtn, testMbBtn, mbStatusLabel, saveBtn, resetDefaultsBtn, saveConfirmLabel);
     }
 
-    private void AddSettingFieldHeader(
-        TableLayoutPanel table,
-        ref int row,
-        string title,
-        string? recommendedValue = null,
-        bool addTopSpacing = true)
+    private FlowLayoutPanel WrapWithRecommendedStar(Control control, string recommendedDescription, Func<bool> isRecommended)
     {
-        var headerFlow = new FlowLayoutPanel
+        var originalMargin = control.Margin;
+        control.Margin = new Padding(0);
+
+        var row = new FlowLayoutPanel
         {
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = true,
+            WrapContents = false,
             BackColor = Color.Transparent,
-            Margin = new Padding(0, addTopSpacing ? 10 : 2, 0, 3),
+            Margin = originalMargin,
             Padding = new Padding(0)
         };
 
+        int starTop = Math.Max(2, (control.PreferredSize.Height - 18) / 2);
+        var star = new RecommendedStarIndicator
+        {
+            Margin = new Padding(8, starTop, 0, 0)
+        };
+        _settingsToolTip.SetToolTip(star, $"At recommended value: {recommendedDescription}");
+        _recommendedIndicators.Add((star, isRecommended));
+
+        row.Controls.Add(control);
+        row.Controls.Add(star);
+        return row;
+    }
+
+    private static bool ExtensionsMatchDefaults(string rawText, string[] defaults)
+    {
+        List<string> parsed = SettingsStore.NormalizeExtensions(
+            rawText.Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries));
+        return parsed.SequenceEqual(defaults, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private void AddSettingFieldHeader(
+        TableLayoutPanel table,
+        ref int row,
+        string title,
+        bool addTopSpacing = true)
+    {
         var titleLabel = new Label
         {
             Text = title,
             AutoSize = true,
             Font = _boldFont,
             Anchor = AnchorStyles.Left,
-            Margin = new Padding(0, 2, 8, 0)
+            Margin = new Padding(0, addTopSpacing ? 10 : 2, 0, 3)
         };
-        headerFlow.Controls.Add(titleLabel);
-
-        if (!string.IsNullOrWhiteSpace(recommendedValue))
-        {
-            var badge = new Label
-            {
-                Text = $"Recommended: {recommendedValue}",
-                AutoSize = true,
-                Font = _smallFont,
-                Padding = new Padding(7, 2, 7, 2),
-                Margin = new Padding(0),
-                Tag = "RecommendedBadge"
-            };
-            _recommendedBadges.Add(badge);
-            headerFlow.Controls.Add(badge);
-        }
-
-        table.Controls.Add(headerFlow, 0, row++);
+        table.Controls.Add(titleLabel, 0, row++);
     }
 
     private void AddSectionDivider(TableLayoutPanel table, ref int row)
@@ -1745,7 +1933,7 @@ public sealed class DashboardForm : Form
         card.AutoSizeMode = AutoSizeMode.GrowAndShrink;
         card.Margin = new Padding(0, 0, 0, 12);
 
-        innerTable = new TableLayoutPanel
+        innerTable = new SmoothTableLayoutPanel
         {
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
@@ -1760,33 +1948,62 @@ public sealed class DashboardForm : Form
         return card;
     }
 
-    private void UpdateResponsiveCards(FlowLayoutPanel host)
+    private void UpdateResponsiveCards(FlowLayoutPanel host, bool force = false)
     {
-        int cardWidth = Math.Max(520, host.ClientSize.Width - host.Padding.Horizontal - 20);
-        foreach (var (card, inner) in _responsiveCards)
+        if (!force && !host.Visible)
         {
-            if (card.Parent != host)
-            {
-                continue;
-            }
-
-            card.MinimumSize = new Size(cardWidth, 0);
-            card.MaximumSize = new Size(cardWidth, 0);
-            inner.MinimumSize = new Size(cardWidth - 32, 0);
-            inner.MaximumSize = new Size(cardWidth - 32, 0);
-            inner.Width = cardWidth - 32;
+            return;
         }
 
-        if (host == _settingsScrollPanel)
+        int cardWidth = Math.Max(520, host.ClientSize.Width - host.Padding.Horizontal - 20);
+        if (!force && _lastCardWidthByHost.TryGetValue(host, out int prevWidth) && prevWidth == cardWidth)
         {
-            Size wrapMax = new(Math.Max(400, cardWidth - 48), 0);
-            _updateHelperLabel.MaximumSize = wrapMax;
-            _thresholdDescLabel.MaximumSize = wrapMax;
-            _updateStatusLabel.MaximumSize = wrapMax;
-            foreach (Label lbl in _wrappingSettingsLabels)
+            return;
+        }
+
+        _lastCardWidthByHost[host] = cardWidth;
+        host.SuspendLayout();
+        try
+        {
+            foreach (var (card, inner) in _responsiveCards)
             {
-                lbl.MaximumSize = wrapMax;
+                if (card.Parent != host)
+                {
+                    continue;
+                }
+
+                card.SuspendLayout();
+                inner.SuspendLayout();
+                try
+                {
+                    card.MinimumSize = new Size(cardWidth, 0);
+                    card.MaximumSize = new Size(cardWidth, 0);
+                    inner.MinimumSize = new Size(cardWidth - 32, 0);
+                    inner.MaximumSize = new Size(cardWidth - 32, 0);
+                    inner.Width = cardWidth - 32;
+                }
+                finally
+                {
+                    inner.ResumeLayout(false);
+                    card.ResumeLayout(false);
+                }
             }
+
+            if (host == _settingsScrollPanel)
+            {
+                Size wrapMax = new(Math.Max(400, cardWidth - 48), 0);
+                _updateHelperLabel.MaximumSize = wrapMax;
+                _thresholdDescLabel.MaximumSize = wrapMax;
+                _updateStatusLabel.MaximumSize = wrapMax;
+                foreach (Label lbl in _wrappingSettingsLabels)
+                {
+                    lbl.MaximumSize = wrapMax;
+                }
+            }
+        }
+        finally
+        {
+            host.ResumeLayout(!_isResizing);
         }
     }
 
@@ -1852,13 +2069,13 @@ public sealed class DashboardForm : Form
 
         _thresholdSlider.ApplyTheme(palette);
         _thresholdDescLabel.ForeColor = palette.TextSecondary;
+        _settingsLegendLabel.ForeColor = palette.TextSecondary;
         _updateHelperLabel.ForeColor = palette.TextSecondary;
         _installedVersionLabel.ForeColor = palette.TextPrimary;
 
-        foreach (Label badge in _recommendedBadges)
+        foreach (var (indicator, _) in _recommendedIndicators)
         {
-            badge.BackColor = palette.AccentBlueBg;
-            badge.ForeColor = palette.AccentBlue;
+            indicator.ApplyTheme(palette);
         }
 
         foreach (Panel divider in _sectionDividers)
@@ -1877,12 +2094,13 @@ public sealed class DashboardForm : Form
         RefreshHeaderStatus();
         RefreshUpdateUiFromLatest();
         UpdateVirusTotalLimitWarnings();
+        UpdateRecommendedStarIndicators();
         RefreshHistoryGrid();
         RefreshQueueGrid();
         RefreshDirectoriesGrid();
         RefreshApiTab();
-        UpdateResponsiveCards(_apiScrollPanel);
-        UpdateResponsiveCards(_settingsScrollPanel);
+        UpdateResponsiveCards(_apiScrollPanel, force: true);
+        UpdateResponsiveCards(_settingsScrollPanel, force: true);
     }
 
     private static void ApplyStandardControlThemeRecursive(Control parent, ThemePalette palette)
@@ -2808,9 +3026,12 @@ public sealed class DashboardForm : Form
         _enableMalwareBazaarCheckBox.Checked = s.EnableMalwareBazaar;
         _malwareBazaarKeyBox.Text = SettingsStore.GetDecryptedMalwareBazaarApiKey(s);
 
-        _autoUpdateCheckBox.Checked = s.AutoUpdateEnabled;
-        _autoUpdateCriticalOnlyCheckBox.Checked = s.AutoUpdateCriticalOnly;
-        _autoUpdateCriticalOnlyCheckBox.Enabled = s.AutoUpdateEnabled;
+        _autoUpdateModeCombo.SelectedIndex = !s.AutoUpdateEnabled
+            ? 0
+            : s.AutoUpdateCriticalOnly
+                ? 1
+                : 2;
+        UpdateRecommendedStarIndicators();
         RefreshUpdateUiFromLatest();
     }
 
@@ -2819,8 +3040,21 @@ public sealed class DashboardForm : Form
         AppSettings settings = _engine.CurrentSettings;
         settings.ThemeMode = (AppThemeMode)Math.Clamp(_themeCombo.SelectedIndex, 0, 2);
         settings.StartWithWindows = _startupCheckBox.Checked;
-        settings.AutoUpdateEnabled = _autoUpdateCheckBox.Checked;
-        settings.AutoUpdateCriticalOnly = _autoUpdateCriticalOnlyCheckBox.Checked;
+        switch (_autoUpdateModeCombo.SelectedIndex)
+        {
+            case 0:
+                settings.AutoUpdateEnabled = false;
+                settings.AutoUpdateCriticalOnly = false;
+                break;
+            case 2:
+                settings.AutoUpdateEnabled = true;
+                settings.AutoUpdateCriticalOnly = false;
+                break;
+            default:
+                settings.AutoUpdateEnabled = true;
+                settings.AutoUpdateCriticalOnly = true;
+                break;
+        }
 
         SettingsStore.SetApiKey(settings, _apiKeyTextBox.Text);
         settings.UploadPolicy = (UploadPolicy)Math.Clamp(_uploadPolicyCombo.SelectedIndex, 0, 2);
@@ -2945,6 +3179,14 @@ public sealed class DashboardForm : Form
         }
     }
 
+    private void UpdateRecommendedStarIndicators()
+    {
+        foreach (var (indicator, isRecommended) in _recommendedIndicators)
+        {
+            indicator.IsAtRecommended = isRecommended();
+        }
+    }
+
     public (int HeaderBottom, int NavTop, int SubtitleBottom, int HeaderHeight, int ScanBtnBottom) GetHeaderLayoutMetricsForTest()
     {
         static int BottomRelativeTo(Control child, Control ancestor)
@@ -2994,9 +3236,12 @@ public sealed class DashboardForm : Form
             _updateReleaseLink.Visible = false;
             _latestReleaseUrl = string.Empty;
             _updateStatusLabel.ForeColor = _palette.TextSecondary;
-            _updateStatusLabel.Text = _autoUpdateCheckBox.Checked
-                ? "Automatic updates enabled. Click Check for Updates to check right now."
-                : "Manual checks enabled (default). Click Check for Updates to query GitHub.";
+            _updateStatusLabel.Text = _autoUpdateModeCombo.SelectedIndex switch
+            {
+                0 => "Automatic updates are turned off (manual checks only). Click Check for Updates to query GitHub.",
+                2 => "Automatic updates enabled for all releases. Click Check for Updates to check right now.",
+                _ => "Critical automatic updates enabled. Click Check for Updates to check right now."
+            };
             return;
         }
 

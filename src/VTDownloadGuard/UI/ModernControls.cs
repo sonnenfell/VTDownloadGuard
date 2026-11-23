@@ -906,3 +906,98 @@ internal static class ModernUiGeometry
         return path;
     }
 }
+
+public sealed class RecommendedStarIndicator : Control
+{
+    private ThemePalette _palette = ThemePalette.Dark;
+    private bool _isAtRecommended;
+
+    public RecommendedStarIndicator()
+    {
+        DoubleBuffered = true;
+        Size = new Size(18, 18);
+        Margin = new Padding(6, 4, 0, 0);
+        TabStop = false;
+    }
+
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public bool IsAtRecommended
+    {
+        get => _isAtRecommended;
+        set
+        {
+            if (_isAtRecommended != value)
+            {
+                _isAtRecommended = value;
+                Invalidate();
+            }
+        }
+    }
+
+    public void ApplyTheme(ThemePalette palette)
+    {
+        _palette = palette;
+        Invalidate();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        Graphics g = e.Graphics;
+        Color bg = Parent?.BackColor is { A: 255 } opaqueBg ? opaqueBg : _palette.CardBg;
+        g.Clear(bg);
+
+        if (!_isAtRecommended)
+        {
+            return;
+        }
+
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        float cx = (Width - 1) / 2f;
+        float cy = (Height - 1) / 2f;
+        float outerR = Math.Min(Width, Height) * 0.42f;
+        float innerR = outerR * 0.44f;
+
+        var pts = new PointF[10];
+        for (int i = 0; i < 10; i++)
+        {
+            double angle = -Math.PI / 2.0 + i * Math.PI / 5.0;
+            float r = (i % 2 == 0) ? outerR : innerR;
+            pts[i] = new PointF(
+                cx + (float)(Math.Cos(angle) * r),
+                cy + (float)(Math.Sin(angle) * r));
+        }
+
+        using var path = new GraphicsPath();
+        path.AddPolygon(pts);
+
+        Color fillColor = _palette.IsDark
+            ? Color.FromArgb(196, 168, 92)
+            : Color.FromArgb(182, 134, 34);
+        Color strokeColor = _palette.IsDark
+            ? Color.FromArgb(224, 198, 126)
+            : Color.FromArgb(148, 106, 22);
+
+        using var fillBrush = new SolidBrush(fillColor);
+        using var strokePen = new Pen(strokeColor, 1f);
+        g.FillPath(fillBrush, path);
+        g.DrawPath(strokePen, path);
+    }
+}
+
+public sealed class SmoothFlowLayoutPanel : FlowLayoutPanel
+{
+    public SmoothFlowLayoutPanel()
+    {
+        DoubleBuffered = true;
+        SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
+    }
+}
+
+public sealed class SmoothTableLayoutPanel : TableLayoutPanel
+{
+    public SmoothTableLayoutPanel()
+    {
+        DoubleBuffered = true;
+        SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
+    }
+}

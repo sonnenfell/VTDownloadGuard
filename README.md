@@ -32,7 +32,7 @@ It runs quietly in the background with almost zero idle CPU usage, sorts pending
 
 Use this option on any 64-bit Windows 10 or Windows 11 PC. No extra runtime or SDK is required.
 
-1. Go to the **Releases** page on GitHub and download `VTDownloadGuard-1.2.1-win-x64-Setup.exe`.
+1. Go to the **Releases** page on GitHub and download `VTDownloadGuard-1.2.2-win-x64-Setup.exe`.
 2. Double-click the installer and follow the setup steps.
 3. Keep **Start automatically minimized to the system tray when Windows starts** checked if you want background protection on every login.
 4. Click **Finish** to launch VTDownloadGuard.
@@ -41,17 +41,17 @@ Use this option on any 64-bit Windows 10 or Windows 11 PC. No extra runtime or S
 
 Use this option if you already have the **.NET 10 Desktop Runtime (x64)** installed and want a tiny portable folder (under 1 MB).
 
-1. Download `VTDownloadGuard-1.2.1-win-x64-Portable-FrameworkDependent.zip` from the **Releases** page.
+1. Download `VTDownloadGuard-1.2.2-win-x64-Portable-FrameworkDependent.zip` from the **Releases** page.
 2. Extract the zip to a folder of your choice (for example, `C:\Program Files\VTDownloadGuard` or `%LocalAppData%\VTDownloadGuard`).
 3. Run `VTDownloadGuard.exe --open` to open the dashboard on first launch.
 
 ## Updating VTDownloadGuard
 
-VTDownloadGuard checks `https://github.com/sonnenfell/VTDownloadGuard/releases/latest` for new versions without overwriting your user data (`settings.json`, `history.json`, and `hash-cache.json` remain in `%AppData%\VTDownloadGuard\` and are backed up before every update).
+VTDownloadGuard checks `https://github.com/sonnenfell/VTDownloadGuard/releases/latest` for new versions without overwriting your user data (`settings.json`, `history.json`, and `hash-cache.json` remain in `%AppData%\VTDownloadGuard\` and are backed up before every update). Choose how updates behave in **Settings -> Updates**:
 
-- **Manual checks (default)**: Click **Check for Updates** in **Settings -> Updates** or right-click the system tray icon and choose **Check for Updates...**.
-- **Automatic updates (optional)**: Enable **Enable automatic update checks and installation** in **Settings -> Updates**.
-- **Critical-only automatic updates (optional)**: When automatic updates are enabled, you can check **Only automatically install updates marked as critical**. Updates are treated as critical when the first line of the GitHub release notes contains `[CRITICAL UPDATE]`.
+- **Critical updates only (default)**: Automatically downloads and applies updates only when the first line of the GitHub release notes contains `[CRITICAL UPDATE]`. You can still click **Check for Updates** anytime to install feature releases manually.
+- **Off (manual checks only)**: Click **Check for Updates** in **Settings -> Updates** or right-click the system tray icon and choose **Check for Updates...**.
+- **On (all releases)**: Automatically installs any newly published release when the scanner is idle.
 
 ## Quick Start
 
