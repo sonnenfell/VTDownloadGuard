@@ -1,5 +1,5 @@
 #define MyAppName "VTDownloadGuard"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "VTDownloadGuard"
 #define MyAppExeName "VTDownloadGuard.exe"
 
@@ -47,8 +47,20 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--open"; Description: "Launch {#MyAppName} now"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--open --after-update"; Flags: nowait; Check: ShouldLaunchOpenSilent
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--minimized --after-update"; Flags: nowait; Check: ShouldLaunchMinimizedSilent
 
 [Code]
+function ShouldLaunchOpenSilent(): Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:OPENAFTERUPDATE|0}') = '1');
+end;
+
+function ShouldLaunchMinimizedSilent(): Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:OPENAFTERUPDATE|0}') <> '1');
+end;
+
 procedure StopRunningApp();
 var
   ResultCode: Integer;

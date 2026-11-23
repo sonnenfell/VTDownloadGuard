@@ -5,7 +5,7 @@ namespace VTDownloadGuard.Services;
 
 public sealed class AppPaths
 {
-    public AppPaths(string? dataDirectory = null)
+    public AppPaths(string? dataDirectory = null, string? updateStagingRoot = null)
     {
         DataDirectory = string.IsNullOrWhiteSpace(dataDirectory)
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VTDownloadGuard")
@@ -15,6 +15,10 @@ public sealed class AppPaths
         HistoryPath = Path.Combine(DataDirectory, "history.json");
         HashCachePath = Path.Combine(DataDirectory, "hash-cache.json");
         LogPath = Path.Combine(DataDirectory, "app.log");
+        BackupsDirectory = Path.Combine(DataDirectory, "backups");
+        UpdateStagingRoot = string.IsNullOrWhiteSpace(updateStagingRoot)
+            ? Path.Combine(Path.GetTempPath(), "VTDownloadGuard-Update")
+            : Path.GetFullPath(updateStagingRoot);
     }
 
     public string DataDirectory { get; }
@@ -22,6 +26,8 @@ public sealed class AppPaths
     public string HistoryPath { get; }
     public string HashCachePath { get; }
     public string LogPath { get; }
+    public string BackupsDirectory { get; }
+    public string UpdateStagingRoot { get; }
 
     public void EnsureDataDirectoryExists()
     {

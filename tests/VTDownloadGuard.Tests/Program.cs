@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -11,6 +12,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows.Forms;
 using VTDownloadGuard.Models;
 using VTDownloadGuard.Services;
 using VTDownloadGuard.UI;
@@ -50,6 +52,8 @@ internal static class Program
 
     private static async Task<int> Main()
     {
+        WindowsFormsSynchronizationContext.AutoInstall = false;
+
         var tests = new (string Name, Func<Task> Body)[]
         {
             ("DpapiSecretProtector round-trip and edge cases", TestDpapiProtector),
@@ -65,6 +69,8 @@ internal static class Program
             ("ScanEngine + DirectoryWatcherManager + FileStabilizer end-to-end", TestEndToEndScanning),
             ("TrayIconFactory loads AppIcon and renders all status shields", TestTrayIconFactory),
             ("ModernThresholdSlider guidance, colors, and clean text", TestThresholdSlider),
+            ("UpdateService version comparison, critical marker, auto-policy, and GitHub API", TestUpdateServiceLogic),
+            ("Self-update SHA-256 verification, zip staging, backup, and data preservation", TestSelfUpdateDataPreservation),
             ("DashboardForm, OnboardingDialog, and TutorialSession UI smoke test", TestDashboardUiSmoke)
         };
 
@@ -704,7 +710,7 @@ internal static class Program
 
         try
         {
-            var paths = new AppPaths(dataDir);
+            var paths = new AppPaths(dataDir, Path.Combine(tempDir, "UpdateStaging"));
             var logger = new AppLogger(paths);
             var settingsStore = new SettingsStore(paths, logger);
             var settings = new AppSettings
@@ -829,7 +835,7 @@ internal static class Program
 
         try
         {
-            var paths = new AppPaths(dataDir);
+            var paths = new AppPaths(dataDir, Path.Combine(tempDir, "UpdateStaging"));
             var logger = new AppLogger(paths);
             var settingsStore = new SettingsStore(paths, logger);
             var settings = new AppSettings
@@ -902,7 +908,7 @@ internal static class Program
 
         try
         {
-            var paths = new AppPaths(dataDir);
+            var paths = new AppPaths(dataDir, Path.Combine(tempDir, "UpdateStaging"));
             var logger = new AppLogger(paths);
             var settingsStore = new SettingsStore(paths, logger);
             var settings = new AppSettings
@@ -1092,13 +1098,318 @@ internal static class Program
         var c8 = ModernThresholdSlider.GetThresholdColor(8, ThemePalette.Dark);
         Assert(c1 != c2 && c2 != c4 && c4 != c6 && c6 != c8, "Slider colors must change across sensitivity ranges.");
 
-        using var slider = new ModernThresholdSlider();
-        Assert(slider.Value == ModernThresholdSlider.RecommendedThreshold, "Default slider value must be 2.");
-        slider.Value = 50;
-        Assert(slider.Value == ModernThresholdSlider.MaxThreshold, "Slider must clamp to max.");
-        slider.Value = 0;
-        Assert(slider.Value == ModernThresholdSlider.MinThreshold, "Slider must clamp to min.");
+        Exception? threadEx = null;
+        var sta = new Thread(() =>
+        {
+            try
+            {
+                using var slider = new ModernThresholdSlider();
+                Assert(slider.Value == ModernThresholdSlider.RecommendedThreshold, "Default slider value must be 2.");
+                slider.Value = 50;
+                Assert(slider.Value == ModernThresholdSlider.MaxThreshold, "Slider must clamp to max.");
+                slider.Value = 0;
+                Assert(slider.Value == ModernThresholdSlider.MinThreshold, "Slider must clamp to min.");
+            }
+            catch (Exception ex)
+            {
+                threadEx = ex;
+            }
+        });
+        sta.SetApartmentState(ApartmentState.STA);
+        sta.Start();
+        sta.Join();
+
+        if (threadEx is not null)
+        {
+            throw new InvalidOperationException("Threshold slider control test failed.", threadEx);
+        }
+
         return Task.CompletedTask;
+    }
+
+    private static async Task TestUpdateServiceLogic()
+    {
+        Assert(UpdateService.TryParseReleaseVersion("v1.2.0", out Version? v120) && v120 == new Version(1, 2, 0, 0),
+            "Should parse v1.2.0 tag.");
+        Assert(UpdateService.TryParseReleaseVersion("1.2.0-rc1", out Version? vRc) && vRc == new Version(1, 2, 0, 0),
+            "Should parse prerelease stripped version.");
+
+        Assert(UpdateService.IsCriticalRelease("[CRITICAL UPDATE] Urgent API fix\nDetails..."),
+            "First-line critical marker must match.");
+        Assert(UpdateService.IsCriticalRelease("\n  [critical update] Security patch\nMore text"),
+            "Case-insensitive marker after blank line must match.");
+        Assert(!UpdateService.IsCriticalRelease("Normal update\n[CRITICAL UPDATE] Not on first line"),
+            "Marker on second line must NOT count as critical.");
+        Assert(!UpdateService.IsCriticalRelease("Regular feature release"),
+            "Regular release notes must not count as critical.");
+
+        Assert(UpdateService.IsAllowedDownloadUrl("https://github.com/sonnenfell/VTDownloadGuard/releases/download/v1.2.0/app.zip"),
+            "GitHub HTTPS URL should be allowed.");
+        Assert(UpdateService.IsAllowedDownloadUrl("https://objects.githubusercontent.com/github-production-release-asset/123"),
+            "GitHub objects CDN URL should be allowed.");
+        Assert(!UpdateService.IsAllowedDownloadUrl("http://github.com/sonnenfell/VTDownloadGuard/app.zip"),
+            "Non-HTTPS URL must be rejected.");
+        Assert(!UpdateService.IsAllowedDownloadUrl("https://evil.example.com/VTDownloadGuard.exe"),
+            "Untrusted host must be rejected.");
+
+        var manualSettings = AppSettings.CreateDefault();
+        Assert(!manualSettings.AutoUpdateEnabled && !manualSettings.AutoUpdateCriticalOnly,
+            "Auto-updates must be manual by default.");
+
+        var normalUpdate = new UpdateCheckResult
+        {
+            Success = true,
+            UpdateAvailable = true,
+            IsCritical = false,
+            DownloadUrl = "https://github.com/sonnenfell/VTDownloadGuard/releases/download/v1.2.0/VTDownloadGuard.zip"
+        };
+        var criticalUpdate = new UpdateCheckResult
+        {
+            Success = true,
+            UpdateAvailable = true,
+            IsCritical = true,
+            DownloadUrl = "https://github.com/sonnenfell/VTDownloadGuard/releases/download/v1.2.0/VTDownloadGuard.zip"
+        };
+
+        Assert(!UpdateService.ShouldAutoInstall(manualSettings, criticalUpdate),
+            "Manual mode must never auto-install even for critical updates.");
+
+        manualSettings.AutoUpdateEnabled = true;
+        manualSettings.AutoUpdateCriticalOnly = true;
+        Assert(!UpdateService.ShouldAutoInstall(manualSettings, normalUpdate),
+            "Critical-only mode must skip non-critical updates.");
+        Assert(UpdateService.ShouldAutoInstall(manualSettings, criticalUpdate),
+            "Critical-only mode must allow critical updates.");
+
+        manualSettings.AutoUpdateCriticalOnly = false;
+        Assert(UpdateService.ShouldAutoInstall(manualSettings, normalUpdate),
+            "Auto-update all mode should allow normal updates.");
+
+        string tempDir = CreateTempDir();
+        try
+        {
+            string appDir = Path.Combine(tempDir, "AppPortable");
+            Directory.CreateDirectory(appDir);
+
+            var paths = new AppPaths(Path.Combine(tempDir, "Data"));
+            var logger = new AppLogger(paths);
+
+            var handler = new MockHttpHandler((req, _) =>
+            {
+                if (req.RequestUri!.ToString().Contains("/releases/latest"))
+                {
+                    return JsonResponse(HttpStatusCode.OK, """
+                    {
+                      "tag_name": "v1.3.0",
+                      "name": "VTDownloadGuard 1.3.0",
+                      "draft": false,
+                      "prerelease": false,
+                      "html_url": "https://github.com/sonnenfell/VTDownloadGuard/releases/tag/v1.3.0",
+                      "body": "[CRITICAL UPDATE] Fixes detection parsing.\nDetails here.",
+                      "assets": [
+                        {
+                          "name": "VTDownloadGuard-1.3.0-win-x64-Setup.exe",
+                          "browser_download_url": "https://github.com/sonnenfell/VTDownloadGuard/releases/download/v1.3.0/VTDownloadGuard-1.3.0-win-x64-Setup.exe",
+                          "size": 36000000,
+                          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        },
+                        {
+                          "name": "VTDownloadGuard-1.3.0-win-x64-Portable-FrameworkDependent.zip",
+                          "browser_download_url": "https://github.com/sonnenfell/VTDownloadGuard/releases/download/v1.3.0/VTDownloadGuard-1.3.0-win-x64-Portable-FrameworkDependent.zip",
+                          "size": 230000,
+                          "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        }
+                      ]
+                    }
+                    """);
+                }
+
+                return JsonResponse(HttpStatusCode.NotFound, "{}");
+            });
+
+            using var updateSvc = new UpdateService(
+                paths,
+                logger,
+                new HttpClient(handler),
+                currentVersionOverride: new Version(1, 2, 0),
+                appDirectoryOverride: appDir);
+
+            UpdateCheckResult res = await updateSvc.CheckForUpdatesAsync(manualSettings, CancellationToken.None);
+            Assert(res.Success && res.UpdateAvailable && res.IsCritical, "Expected critical update v1.3.0 available.");
+            Assert(res.AssetName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase),
+                $"Portable install should prefer .zip asset, got '{res.AssetName}'.");
+            Assert(res.ExpectedSha256 == new string('b', 64), "Expected SHA-256 digest from GitHub API asset.");
+
+            // Inno install should select Setup.exe
+            File.WriteAllBytes(Path.Combine(appDir, "unins000.exe"), [1, 2, 3]);
+            UpdateCheckResult resInno = await updateSvc.CheckForUpdatesAsync(manualSettings, CancellationToken.None);
+            Assert(resInno.AssetName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase),
+                $"Inno install should prefer Setup.exe asset, got '{resInno.AssetName}'.");
+        }
+        finally
+        {
+            CleanupDir(tempDir);
+        }
+    }
+
+    private static async Task TestSelfUpdateDataPreservation()
+    {
+        string tempDir = CreateTempDir();
+        string appDir = Path.Combine(tempDir, "App");
+        string dataDir = Path.Combine(tempDir, "Data");
+        Directory.CreateDirectory(appDir);
+        Directory.CreateDirectory(dataDir);
+
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(appDir, "VTDownloadGuard.exe"), "OLD_EXE_V1.1.0");
+            await File.WriteAllTextAsync(Path.Combine(appDir, "VTDownloadGuard.dll"), "OLD_DLL_V1.1.0");
+
+            var paths = new AppPaths(dataDir, Path.Combine(tempDir, "UpdateStaging"));
+            var logger = new AppLogger(paths);
+            var settingsStore = new SettingsStore(paths, logger);
+            var settings = AppSettings.CreateDefault();
+            SettingsStore.SetApiKey(settings, "preserved-vt-key-xyz");
+            settings.WatchedDirectories.Add(new WatchedDirectory { Path = @"E:\CustomWatched", IncludeSubdirectories = true, Enabled = true });
+            settings.AutoUpdateEnabled = true;
+            settings.AutoUpdateCriticalOnly = true;
+            settingsStore.Save(settings);
+
+            var historyStore = new HistoryAndCacheStore(paths, logger);
+            historyStore.AddOrUpdateScanRecord(new ScanRecord
+            {
+                FileName = "preserved.exe",
+                FilePath = @"C:\Temp\preserved.exe",
+                Sha256 = "feedface1234",
+                Verdict = ScanVerdict.Clean,
+                TotalEngines = 70,
+                Summary = "Preserved record"
+            });
+            historyStore.UpsertCacheEntry(new HashCacheEntry
+            {
+                Sha256 = "feedface1234",
+                CachedAtUtc = DateTimeOffset.UtcNow,
+                WasFoundOnVirusTotal = true,
+                TotalEngines = 70
+            });
+
+            // Build in-memory update zip
+            byte[] zipBytes;
+            using (var ms = new MemoryStream())
+            {
+                using (var zip = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
+                {
+                    var exeEntry = zip.CreateEntry("VTDownloadGuard.exe");
+                    await using (var s = exeEntry.Open())
+                    await using (var w = new StreamWriter(s))
+                    {
+                        await w.WriteAsync("NEW_EXE_V1.2.0");
+                    }
+
+                    var dllEntry = zip.CreateEntry("VTDownloadGuard.dll");
+                    await using (var s = dllEntry.Open())
+                    await using (var w = new StreamWriter(s))
+                    {
+                        await w.WriteAsync("NEW_DLL_V1.2.0");
+                    }
+                }
+
+                zipBytes = ms.ToArray();
+            }
+
+            string goodSha = Convert.ToHexStringLower(SHA256.HashData(zipBytes));
+
+            var handler = new MockHttpHandler((req, _) =>
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new ByteArrayContent(zipBytes)
+                };
+            });
+
+            using var updateSvc = new UpdateService(
+                paths,
+                logger,
+                new HttpClient(handler),
+                currentVersionOverride: new Version(1, 1, 0),
+                appDirectoryOverride: appDir);
+
+            // 1. Corrupted hash must abort without modifying appDir
+            var badCheck = new UpdateCheckResult
+            {
+                Success = true,
+                UpdateAvailable = true,
+                TagName = "v1.2.0",
+                AssetName = "VTDownloadGuard-1.2.0-win-x64-Portable-FrameworkDependent.zip",
+                DownloadUrl = "https://github.com/sonnenfell/VTDownloadGuard/releases/download/v1.2.0/update.zip",
+                AssetSizeBytes = zipBytes.Length,
+                ExpectedSha256 = new string('0', 64)
+            };
+
+            var (badStarted, _) = await updateSvc.DownloadAndApplyUpdateAsync(
+                badCheck,
+                openDashboardAfterUpdate: false,
+                onProgress: null,
+                requestAppExit: () => { },
+                CancellationToken.None,
+                launchInstallerProcess: false);
+            Assert(!badStarted, "SHA-256 mismatch must abort update.");
+            Assert(await File.ReadAllTextAsync(Path.Combine(appDir, "VTDownloadGuard.exe")) == "OLD_EXE_V1.1.0",
+                "Old executable must stay untouched on hash mismatch.");
+
+            // 2. Valid hash downloads, backs up data, extracts, and SelfUpdateApplier replaces binaries while preserving AppData
+            var goodCheck = new UpdateCheckResult
+            {
+                Success = true,
+                UpdateAvailable = true,
+                TagName = "v1.2.0",
+                AssetName = "VTDownloadGuard-1.2.0-win-x64-Portable-FrameworkDependent.zip",
+                DownloadUrl = "https://github.com/sonnenfell/VTDownloadGuard/releases/download/v1.2.0/update.zip",
+                AssetSizeBytes = zipBytes.Length,
+                ExpectedSha256 = goodSha
+            };
+
+            var (okStarted, okMsg) = await updateSvc.DownloadAndApplyUpdateAsync(
+                goodCheck,
+                openDashboardAfterUpdate: false,
+                onProgress: null,
+                requestAppExit: () => { },
+                CancellationToken.None,
+                launchInstallerProcess: false);
+            Assert(okStarted, $"Valid update staging failed: {okMsg}");
+
+            string[] backups = Directory.GetDirectories(paths.BackupsDirectory, "pre-update-*");
+            Assert(backups.Length == 1, "Expected 1 pre-update backup directory.");
+            Assert(File.Exists(Path.Combine(backups[0], "settings.json")), "Backup must contain settings.json.");
+            Assert(File.Exists(Path.Combine(backups[0], "history.json")), "Backup must contain history.json.");
+            Assert(File.Exists(Path.Combine(backups[0], "hash-cache.json")), "Backup must contain hash-cache.json.");
+
+            string extractedDir = Directory.GetDirectories(paths.UpdateStagingRoot, "extracted", SearchOption.AllDirectories).Single();
+            SelfUpdateApplier.ApplyDirectoryCopy(extractedDir, appDir);
+
+            Assert(await File.ReadAllTextAsync(Path.Combine(appDir, "VTDownloadGuard.exe")) == "NEW_EXE_V1.2.0",
+                "Updated executable should be copied.");
+            Assert(await File.ReadAllTextAsync(Path.Combine(appDir, "VTDownloadGuard.dll")) == "NEW_DLL_V1.2.0",
+                "Updated DLL should be copied.");
+
+            var reloadedSettings = new SettingsStore(paths, logger).Load();
+            Assert(SettingsStore.GetDecryptedApiKey(reloadedSettings) == "preserved-vt-key-xyz",
+                "Encrypted API key must survive update.");
+            Assert(reloadedSettings.WatchedDirectories.Any(d => d.Path.Equals(@"E:\CustomWatched", StringComparison.OrdinalIgnoreCase)),
+                "Configured directories must survive update.");
+            Assert(reloadedSettings.AutoUpdateEnabled && reloadedSettings.AutoUpdateCriticalOnly,
+                "Update preferences must survive update.");
+
+            var reloadedHistory = new HistoryAndCacheStore(paths, logger);
+            Assert(reloadedHistory.GetHistory().Any(r => r.FileName == "preserved.exe"),
+                "Scan history must survive update.");
+            Assert(reloadedHistory.TryGetCachedHash("feedface1234", out _),
+                "Hash cache must survive update.");
+        }
+        finally
+        {
+            CleanupDir(tempDir);
+        }
     }
 
     private static Task TestDashboardUiSmoke()
@@ -1139,9 +1450,10 @@ internal static class Program
                 var handler = new MockHttpHandler((_, _) => JsonResponse(HttpStatusCode.NotFound, "{}"));
                 using var vtClient = new VirusTotalClient(limiter, logger, new HttpClient(handler));
                 using var engine = new ScanEngine(settingsStore, history, limiter, vtClient, logger);
+                using var updateSvc = new UpdateService(paths, logger, new HttpClient(handler));
                 using var icons = new TrayIconFactory();
 
-                using var form = new DashboardForm(engine, paths, logger, icons.AppIcon);
+                using var form = new DashboardForm(engine, paths, logger, icons.AppIcon, updateSvc);
                 form.PerformLayout();
                 for (int tab = 0; tab < 5; tab++)
                 {
@@ -1172,7 +1484,7 @@ internal static class Program
                 // Switch to Light theme and revisit Dashboard + Onboarding
                 settings.ThemeMode = AppThemeMode.Light;
                 engine.ApplySettings(settings);
-                using var formLight = new DashboardForm(engine, paths, logger, icons.AppIcon);
+                using var formLight = new DashboardForm(engine, paths, logger, icons.AppIcon, updateSvc);
                 for (int tab = 0; tab < 5; tab++)
                 {
                     formLight.SelectTab(tab);

@@ -22,6 +22,9 @@ public sealed class DashboardForm : Form
     private readonly ScanEngine _engine;
     private readonly AppPaths _paths;
     private readonly AppLogger _logger;
+    private readonly UpdateService _updateService;
+    private readonly bool _ownsUpdateService;
+    private readonly Action _requestShutdownForUpdate;
     private ThemePalette _palette;
 
     private readonly Font _headerTitleFont = new("Segoe UI Semibold", 13.5f);
@@ -41,6 +44,7 @@ public sealed class DashboardForm : Form
     private readonly ModernButton _headerScanBtn;
     private readonly ModernButton _headerPauseBtn;
     private readonly ModernButton _headerTourBtn;
+    private readonly ModernButton _headerUpdateBtn;
     private readonly ModernButton _acknowledgeBtn;
     private TutorialSession? _activeTutorial;
     private bool _onboardingPromptedThisInstance;
@@ -117,11 +121,24 @@ public sealed class DashboardForm : Form
     // Tab 4: Settings
     private readonly FlowLayoutPanel _settingsScrollPanel;
     private readonly ModernCardPanel _generalCard;
+    private readonly ModernCardPanel _updatesCard;
     private readonly ModernCardPanel _vtSettingsCard;
     private readonly ModernCardPanel _secondarySettingsCard;
     private readonly Panel _settingsSaveBar;
     private readonly ComboBox _themeCombo;
     private readonly CheckBox _startupCheckBox;
+    private readonly Label _installedVersionLabel;
+    private readonly Label _updateStatusLabel;
+    private readonly LinkLabel _updateReleaseLink;
+    private readonly ModernProgressBar _updateProgressBar;
+    private readonly ModernButton _checkUpdatesBtn;
+    private readonly ModernButton _installUpdateBtn;
+    private readonly CheckBox _autoUpdateCheckBox;
+    private readonly CheckBox _autoUpdateCriticalOnlyCheckBox;
+    private readonly Label _updateHelperLabel;
+    private string _latestReleaseUrl = string.Empty;
+    private bool _updateActionInFlight;
+    private bool _resourcesCleanedUp;
     private readonly TextBox _apiKeyTextBox;
     private readonly ModernButton _toggleKeyVisibilityBtn;
     private readonly ModernButton _testKeyBtn;
@@ -159,11 +176,20 @@ public sealed class DashboardForm : Form
     private readonly List<LinkLabel> _allLinks = [];
     private readonly List<(Control Card, TableLayoutPanel Inner)> _responsiveCards = [];
 
-    public DashboardForm(ScanEngine engine, AppPaths paths, AppLogger logger, Icon appIcon)
+    public DashboardForm(
+        ScanEngine engine,
+        AppPaths paths,
+        AppLogger logger,
+        Icon appIcon,
+        UpdateService? updateService = null,
+        Action? requestShutdownForUpdate = null)
     {
         _engine = engine;
         _paths = paths;
         _logger = logger;
+        _ownsUpdateService = updateService is null;
+        _updateService = updateService ?? new UpdateService(paths, logger);
+        _requestShutdownForUpdate = requestShutdownForUpdate ?? Close;
         _palette = ThemePalette.Resolve(_engine.CurrentSettings.ThemeMode);
 
         Text = "VTDownloadGuard";
@@ -296,7 +322,11 @@ public sealed class DashboardForm : Form
         _headerTourBtn = MakeButton("UI Tour", ModernButtonVariant.Ghost);
         _headerTourBtn.Click += (_, _) => StartUiTutorial();
 
-        rightHeader.Controls.AddRange([_acknowledgeBtn, _headerScanBtn, _headerPauseBtn, _headerTourBtn]);
+        _headerUpdateBtn = MakeButton("Update Ready", ModernButtonVariant.Primary);
+        _headerUpdateBtn.Visible = false;
+        _headerUpdateBtn.Click += (_, _) => ScrollToUpdatesCard();
+
+        rightHeader.Controls.AddRange([_acknowledgeBtn, _headerUpdateBtn, _headerScanBtn, _headerPauseBtn, _headerTourBtn]);
 
         headerLayout.Controls.Add(leftHeader, 0, 0);
         headerLayout.Controls.Add(rightHeader, 1, 0);
@@ -375,11 +405,21 @@ public sealed class DashboardForm : Form
         (_tabViews[TabSettings],
             _settingsScrollPanel,
             _generalCard,
+            _updatesCard,
             _vtSettingsCard,
             _secondarySettingsCard,
             _settingsSaveBar,
             _themeCombo,
             _startupCheckBox,
+            _installedVersionLabel,
+            _updateStatusLabel,
+            _updateReleaseLink,
+            _updateProgressBar,
+            _checkUpdatesBtn,
+            _installUpdateBtn,
+            _autoUpdateCheckBox,
+            _autoUpdateCriticalOnlyCheckBox,
+            _updateHelperLabel,
             _apiKeyTextBox,
             _toggleKeyVisibilityBtn,
             _testKeyBtn,
@@ -431,6 +471,7 @@ public sealed class DashboardForm : Form
         _engine.StatusChanged += OnEngineChanged;
         _engine.QueueChanged += OnQueueChanged;
         _engine.ScanCompleted += OnScanCompleted;
+        _updateService.UpdateStatusChanged += OnUpdateStatusChanged;
 
         LoadSettingsIntoControls();
         ApplyTheme(_palette);
@@ -462,6 +503,24 @@ public sealed class DashboardForm : Form
 
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
+        CleanupSubscriptionsAndTimers();
+        base.OnFormClosed(e);
+    }
+
+    private void ScrollToUpdatesCard()
+    {
+        SelectTab(TabSettings);
+        _settingsScrollPanel.ScrollControlIntoView(_updatesCard);
+    }
+
+    private void CleanupSubscriptionsAndTimers()
+    {
+        if (_resourcesCleanedUp)
+        {
+            return;
+        }
+
+        _resourcesCleanedUp = true;
         _activeTutorial?.Dispose();
         _activeTutorial = null;
         _apiLiveTimer.Stop();
@@ -469,7 +528,11 @@ public sealed class DashboardForm : Form
         _engine.StatusChanged -= OnEngineChanged;
         _engine.QueueChanged -= OnQueueChanged;
         _engine.ScanCompleted -= OnScanCompleted;
-        base.OnFormClosed(e);
+        _updateService.UpdateStatusChanged -= OnUpdateStatusChanged;
+        if (_ownsUpdateService)
+        {
+            _updateService.Dispose();
+        }
     }
 
     public void ShowOnboardingWizard()
@@ -557,6 +620,7 @@ public sealed class DashboardForm : Form
     {
         if (disposing)
         {
+            CleanupSubscriptionsAndTimers();
             _headerTitleFont.Dispose();
             _sectionTitleFont.Dispose();
             _boldFont.Dispose();
@@ -1145,11 +1209,21 @@ public sealed class DashboardForm : Form
         Panel View,
         FlowLayoutPanel ScrollPanel,
         ModernCardPanel GeneralCard,
+        ModernCardPanel UpdatesCard,
         ModernCardPanel VtCard,
         ModernCardPanel SecondaryCard,
         Panel SaveBar,
         ComboBox ThemeCombo,
         CheckBox StartupCheckBox,
+        Label InstalledVersionLabel,
+        Label UpdateStatusLabel,
+        LinkLabel UpdateReleaseLink,
+        ModernProgressBar UpdateProgressBar,
+        ModernButton CheckUpdatesBtn,
+        ModernButton InstallUpdateBtn,
+        CheckBox AutoUpdateCheckBox,
+        CheckBox AutoUpdateCriticalOnlyCheckBox,
+        Label UpdateHelperLabel,
         TextBox ApiKeyBox,
         ModernButton ToggleKeyBtn,
         ModernButton TestKeyBtn,
@@ -1226,7 +1300,98 @@ public sealed class DashboardForm : Form
         helpButtonsRow.Controls.AddRange([runWizardBtn, startTourBtn]);
         genTable.Controls.Add(helpButtonsRow, 1, gr++);
 
-        // Card 2: VirusTotal Configuration
+        // Card 2: Updates
+        var updatesCard = CreateResponsiveCard(scroll, out TableLayoutPanel updTable, 2);
+        updTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 260));
+        updTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+        int ur = 0;
+        var updTitle = new Label { Text = "Updates", Font = _sectionTitleFont, AutoSize = true, Margin = new Padding(0, 0, 0, 8) };
+        updTable.SetColumnSpan(updTitle, 2);
+        updTable.Controls.Add(updTitle, 0, ur++);
+
+        updTable.Controls.Add(MakeFieldLabel("Current version:", _bodyFont), 0, ur);
+        var installedVersionLabel = new Label
+        {
+            Text = $"v{_updateService.CurrentVersion.ToString(3)}",
+            AutoSize = true,
+            Font = _boldFont,
+            Margin = new Padding(0, 6, 0, 6)
+        };
+        updTable.Controls.Add(installedVersionLabel, 1, ur++);
+
+        updTable.Controls.Add(MakeFieldLabel("Update status:", _bodyFont), 0, ur);
+        var statusRow = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Margin = new Padding(0, 4, 0, 4) };
+        var updateStatusLabel = new Label
+        {
+            Text = "Manual checks enabled (default). Click Check for Updates to query GitHub.",
+            AutoSize = true,
+            MaximumSize = new Size(460, 0),
+            Margin = new Padding(0, 2, 12, 0)
+        };
+        var updateReleaseLink = new LinkLabel { Text = "View release notes", AutoSize = true, Font = _smallFont, Visible = false, Margin = new Padding(0, 2, 0, 0) };
+        updateReleaseLink.LinkClicked += (_, _) =>
+        {
+            if (!string.IsNullOrWhiteSpace(_latestReleaseUrl))
+            {
+                OpenUrl(_latestReleaseUrl);
+            }
+        };
+        _allLinks.Add(updateReleaseLink);
+        statusRow.Controls.AddRange([updateStatusLabel, updateReleaseLink]);
+        updTable.Controls.Add(statusRow, 1, ur++);
+
+        updTable.Controls.Add(new Panel { Height = 1 }, 0, ur);
+        var updateProgressBar = MakeProgressBar();
+        updateProgressBar.Dock = DockStyle.None;
+        updateProgressBar.Width = 460;
+        updateProgressBar.Height = 12;
+        updateProgressBar.Maximum = 100;
+        updateProgressBar.Value = 0;
+        updateProgressBar.Visible = false;
+        updateProgressBar.Margin = new Padding(0, 2, 0, 6);
+        updTable.Controls.Add(updateProgressBar, 1, ur++);
+
+        updTable.Controls.Add(new Panel { Height = 1 }, 0, ur);
+        var updBtnRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 2, 0, 8) };
+        var checkUpdatesBtn = MakeButton("Check for Updates", ModernButtonVariant.Secondary);
+        checkUpdatesBtn.Click += async (_, _) => await CheckForUpdatesAsync();
+        var installUpdateBtn = MakeButton("Download and Install Update", ModernButtonVariant.Primary);
+        installUpdateBtn.Enabled = false;
+        installUpdateBtn.Click += async (_, _) => await InstallUpdateAsync();
+        updBtnRow.Controls.AddRange([checkUpdatesBtn, installUpdateBtn]);
+        updTable.Controls.Add(updBtnRow, 1, ur++);
+
+        updTable.Controls.Add(MakeFieldLabel("Automatic updates:", _bodyFont), 0, ur);
+        var autoStack = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, Margin = new Padding(0, 2, 0, 2) };
+        var autoUpdateCheckBox = new CheckBox
+        {
+            Text = "Enable automatic update checks and installation",
+            AutoSize = true,
+            Margin = new Padding(0, 2, 0, 4)
+        };
+        var autoCriticalOnlyCheckBox = new CheckBox
+        {
+            Text = "Only automatically install updates marked as critical",
+            AutoSize = true,
+            Margin = new Padding(20, 0, 0, 6)
+        };
+        autoUpdateCheckBox.CheckedChanged += (_, _) =>
+        {
+            autoCriticalOnlyCheckBox.Enabled = autoUpdateCheckBox.Checked;
+        };
+        var updateHelperLabel = new Label
+        {
+            Text = $"Critical updates are indicated by {UpdateService.CriticalReleaseMarker} on the first line of the GitHub release notes. Settings, directories, and scan history are backed up and preserved during updates.",
+            AutoSize = true,
+            MaximumSize = new Size(520, 0),
+            Font = _smallFont,
+            Margin = new Padding(0, 2, 0, 2)
+        };
+        autoStack.Controls.AddRange([autoUpdateCheckBox, autoCriticalOnlyCheckBox, updateHelperLabel]);
+        updTable.Controls.Add(autoStack, 1, ur++);
+
+        // Card 3: VirusTotal Configuration
         var vtCard = CreateResponsiveCard(scroll, out TableLayoutPanel vtTable, 2);
         vtTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 260));
         vtTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -1416,7 +1581,9 @@ public sealed class DashboardForm : Form
         root.Controls.Add(saveBar, 0, 1);
 
         view.Controls.Add(root);
-        return (view, scroll, generalCard, vtCard, secCard, saveBar, themeCombo, startupCheck,
+        return (view, scroll, generalCard, updatesCard, vtCard, secCard, saveBar, themeCombo, startupCheck,
+            installedVersionLabel, updateStatusLabel, updateReleaseLink, updateProgressBar,
+            checkUpdatesBtn, installUpdateBtn, autoUpdateCheckBox, autoCriticalOnlyCheckBox, updateHelperLabel,
             apiKeyBox, toggleKeyBtn, testKeyBtn, keyStatusLabel, uploadPolicyCombo, filterModeCombo,
             uploadExtBox, archiveExtBox, resetExtBtn, thresholdContainer, thresholdSlider, thresholdDescLabel,
             rateLimitNum, maxHashNum,
@@ -1526,6 +1693,8 @@ public sealed class DashboardForm : Form
 
         _thresholdSlider.ApplyTheme(palette);
         _thresholdDescLabel.ForeColor = palette.TextSecondary;
+        _updateHelperLabel.ForeColor = palette.TextSecondary;
+        _installedVersionLabel.ForeColor = palette.TextPrimary;
 
         ModernGridHelper.ConfigureGrid(_historyGrid, palette);
         ModernGridHelper.ConfigureGrid(_queueGrid, palette);
@@ -1536,6 +1705,7 @@ public sealed class DashboardForm : Form
         ThemePalette.ApplyWindowTheme(this, palette);
 
         RefreshHeaderStatus();
+        RefreshUpdateUiFromLatest();
         RefreshHistoryGrid();
         RefreshQueueGrid();
         RefreshDirectoriesGrid();
@@ -2464,6 +2634,11 @@ public sealed class DashboardForm : Form
         _metaDefenderKeyBox.Text = SettingsStore.GetDecryptedMetaDefenderApiKey(s);
         _enableMalwareBazaarCheckBox.Checked = s.EnableMalwareBazaar;
         _malwareBazaarKeyBox.Text = SettingsStore.GetDecryptedMalwareBazaarApiKey(s);
+
+        _autoUpdateCheckBox.Checked = s.AutoUpdateEnabled;
+        _autoUpdateCriticalOnlyCheckBox.Checked = s.AutoUpdateCriticalOnly;
+        _autoUpdateCriticalOnlyCheckBox.Enabled = s.AutoUpdateEnabled;
+        RefreshUpdateUiFromLatest();
     }
 
     private void SaveSettingsFromForm()
@@ -2471,6 +2646,8 @@ public sealed class DashboardForm : Form
         AppSettings settings = _engine.CurrentSettings;
         settings.ThemeMode = (AppThemeMode)Math.Clamp(_themeCombo.SelectedIndex, 0, 2);
         settings.StartWithWindows = _startupCheckBox.Checked;
+        settings.AutoUpdateEnabled = _autoUpdateCheckBox.Checked;
+        settings.AutoUpdateCriticalOnly = _autoUpdateCriticalOnlyCheckBox.Checked;
 
         SettingsStore.SetApiKey(settings, _apiKeyTextBox.Text);
         settings.UploadPolicy = (UploadPolicy)Math.Clamp(_uploadPolicyCombo.SelectedIndex, 0, 2);
@@ -2506,6 +2683,152 @@ public sealed class DashboardForm : Form
 
         _saveConfirmLabel.ForeColor = resolved.SuccessGreen;
         _saveConfirmLabel.Text = "Settings saved.";
+    }
+
+    private void OnUpdateStatusChanged(UpdateCheckResult result)
+    {
+        if (IsDisposed || !IsHandleCreated)
+        {
+            return;
+        }
+
+        BeginInvoke(() =>
+        {
+            if (!IsDisposed)
+            {
+                RefreshUpdateUiFromLatest();
+            }
+        });
+    }
+
+    private void RefreshUpdateUiFromLatest()
+    {
+        UpdateCheckResult? latest = _updateService.LatestCheckResult;
+        if (latest is null)
+        {
+            _headerUpdateBtn.Visible = false;
+            _installUpdateBtn.Enabled = false;
+            _updateReleaseLink.Visible = false;
+            _latestReleaseUrl = string.Empty;
+            _updateStatusLabel.ForeColor = _palette.TextSecondary;
+            _updateStatusLabel.Text = _autoUpdateCheckBox.Checked
+                ? "Automatic updates enabled. Click Check for Updates to check right now."
+                : "Manual checks enabled (default). Click Check for Updates to query GitHub.";
+            return;
+        }
+
+        _latestReleaseUrl = latest.ReleaseHtmlUrl;
+        _updateReleaseLink.Visible = !string.IsNullOrWhiteSpace(_latestReleaseUrl);
+
+        if (!latest.Success)
+        {
+            _headerUpdateBtn.Visible = false;
+            _installUpdateBtn.Enabled = false;
+            _updateStatusLabel.ForeColor = _palette.WarningAmber;
+            _updateStatusLabel.Text = latest.ErrorMessage;
+            return;
+        }
+
+        if (latest.UpdateAvailable)
+        {
+            string tag = string.IsNullOrWhiteSpace(latest.TagName)
+                ? $"v{latest.LatestVersion?.ToString(3)}"
+                : latest.TagName;
+            string critTag = latest.IsCritical ? " [Critical]" : string.Empty;
+            _headerUpdateBtn.Text = $"Update {tag}";
+            _headerUpdateBtn.Visible = true;
+            _installUpdateBtn.Enabled = !_updateActionInFlight;
+            _updateStatusLabel.ForeColor = latest.IsCritical ? _palette.WarningAmber : _palette.SuccessGreen;
+            _updateStatusLabel.Text = $"New version available: {tag}{critTag} ({latest.AssetName}). Your settings and history will be preserved.";
+            return;
+        }
+
+        _headerUpdateBtn.Visible = false;
+        _installUpdateBtn.Enabled = false;
+        _updateStatusLabel.ForeColor = _palette.SuccessGreen;
+        _updateStatusLabel.Text = $"Up to date (v{_updateService.CurrentVersion.ToString(3)} checked at {latest.CheckedAtUtc.ToLocalTime():HH:mm:ss}).";
+    }
+
+    private async Task CheckForUpdatesAsync()
+    {
+        if (_updateActionInFlight)
+        {
+            return;
+        }
+
+        _updateActionInFlight = true;
+        _checkUpdatesBtn.Enabled = false;
+        _installUpdateBtn.Enabled = false;
+        _updateStatusLabel.ForeColor = _palette.TextSecondary;
+        _updateStatusLabel.Text = "Checking GitHub for the latest release...";
+        try
+        {
+            _ = await _updateService.CheckForUpdatesAsync(_engine.CurrentSettings);
+        }
+        finally
+        {
+            _updateActionInFlight = false;
+            if (!IsDisposed)
+            {
+                _checkUpdatesBtn.Enabled = true;
+                RefreshUpdateUiFromLatest();
+            }
+        }
+    }
+
+    private async Task InstallUpdateAsync()
+    {
+        UpdateCheckResult? latest = _updateService.LatestCheckResult;
+        if (latest is null || !latest.Success || !latest.UpdateAvailable || _updateActionInFlight)
+        {
+            return;
+        }
+
+        _updateActionInFlight = true;
+        _checkUpdatesBtn.Enabled = false;
+        _installUpdateBtn.Enabled = false;
+        _updateProgressBar.Value = 0;
+        _updateProgressBar.Visible = true;
+        _updateStatusLabel.ForeColor = _palette.TextSecondary;
+        _updateStatusLabel.Text = "Preparing update...";
+
+        try
+        {
+            var (started, message) = await _updateService.DownloadAndApplyUpdateAsync(
+                latest,
+                openDashboardAfterUpdate: true,
+                (stage, pct) =>
+                {
+                    if (!IsDisposed && IsHandleCreated)
+                    {
+                        BeginInvoke(() =>
+                        {
+                            if (!IsDisposed)
+                            {
+                                _updateStatusLabel.Text = stage;
+                                _updateProgressBar.Value = pct;
+                            }
+                        });
+                    }
+                },
+                _requestShutdownForUpdate);
+
+            if (!started && !IsDisposed)
+            {
+                _updateProgressBar.Visible = false;
+                _updateStatusLabel.ForeColor = _palette.DangerRed;
+                _updateStatusLabel.Text = message;
+            }
+        }
+        finally
+        {
+            _updateActionInFlight = false;
+            if (!IsDisposed)
+            {
+                _checkUpdatesBtn.Enabled = true;
+                _installUpdateBtn.Enabled = _updateService.LatestCheckResult?.UpdateAvailable ?? false;
+            }
+        }
     }
 
     private async Task TestVirusTotalKeyAsync()

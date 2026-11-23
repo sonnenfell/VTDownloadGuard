@@ -289,5 +289,14 @@ public sealed class SettingsStore
         {
             settings.ThemeMode = AppThemeMode.System;
         }
+
+        if (string.IsNullOrWhiteSpace(settings.UpdateRepository))
+        {
+            settings.UpdateRepository = "sonnenfell/VTDownloadGuard";
+        }
+        else
+        {
+            settings.UpdateRepository = settings.UpdateRepository.Trim();
+        }
     }
 }

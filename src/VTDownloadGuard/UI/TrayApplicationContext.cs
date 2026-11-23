@@ -17,7 +17,8 @@ public sealed class TrayApplicationContext : ApplicationContext
         None = 0,
         UnsafeAlert = 1,
         MissingApiKey = 2,
-        AuthError = 3
+        AuthError = 3,
+        UpdateAvailable = 4
     }
 
     private sealed class SingleInstanceMessageWindow : NativeWindow, IDisposable
@@ -56,6 +57,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly AppPaths _paths;
     private readonly AppLogger _logger;
     private readonly VirusTotalClient _vtClient;
+    private readonly UpdateService _updateService;
     private readonly TrayIconFactory _iconFactory;
 
     private readonly Control _marshalControl;
@@ -71,6 +73,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _openDashboardMenuItem;
     private readonly ToolStripMenuItem _scanFileMenuItem;
     private readonly ToolStripMenuItem _pauseResumeMenuItem;
+    private readonly ToolStripMenuItem _checkUpdatesMenuItem;
     private readonly ToolStripMenuItem _exitMenuItem;
 
     private DashboardForm? _dashboard;
@@ -79,10 +82,14 @@ public sealed class TrayApplicationContext : ApplicationContext
     private DateTimeOffset _lastAuthBalloonUtc = DateTimeOffset.MinValue;
     private int _scanAnimFrame;
     private bool _exiting;
+    private bool? _lastAutoUpdateEnabled;
+    private bool? _lastAutoUpdateCriticalOnly;
+    private string? _lastUpdateRepository;
 
     public TrayApplicationContext(
         ScanEngine engine,
         VirusTotalClient vtClient,
+        UpdateService updateService,
         AppPaths paths,
         AppLogger logger,
         uint showDashboardMessageId,
@@ -90,6 +97,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     {
         _engine = engine;
         _vtClient = vtClient;
+        _updateService = updateService;
         _paths = paths;
         _logger = logger;
         _iconFactory = new TrayIconFactory();
@@ -133,6 +141,9 @@ public sealed class TrayApplicationContext : ApplicationContext
         _pauseResumeMenuItem = new ToolStripMenuItem("Pause Monitoring");
         _pauseResumeMenuItem.Click += (_, _) => _engine.SetPaused(!_engine.IsPaused);
 
+        _checkUpdatesMenuItem = new ToolStripMenuItem("Check for Updates...");
+        _checkUpdatesMenuItem.Click += async (_, _) => await CheckForUpdatesManuallyAsync();
+
         _exitMenuItem = new ToolStripMenuItem("Exit");
         _exitMenuItem.Click += (_, _) => ExitApplication();
 
@@ -147,6 +158,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             _scanFileMenuItem,
             _pauseResumeMenuItem,
             new ToolStripSeparator(),
+            _checkUpdatesMenuItem,
             _exitMenuItem
         ]);
         ApplyContextMenuTheme();
@@ -172,6 +184,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         _engine.ApiAuthFailed += OnApiAuthFailed;
 
         _engine.Start();
+        SyncAutoUpdateConfiguration();
         UpdateTrayVisuals();
 
         if (openDashboardOnStart)
@@ -252,6 +265,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             return;
         }
 
+        SyncAutoUpdateConfiguration();
         ApplyContextMenuTheme();
 
         TrayStatus status = _engine.CurrentTrayStatus;
@@ -350,6 +364,10 @@ public sealed class TrayApplicationContext : ApplicationContext
                 ShowDashboard(tabIndex: SettingsTabIndex, focusApiKey: true);
                 break;
 
+            case BalloonKind.UpdateAvailable:
+                ShowDashboard(tabIndex: SettingsTabIndex, focusApiKey: false);
+                break;
+
             default:
                 ShowDashboard();
                 break;
@@ -386,7 +404,13 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         if (_dashboard is null || _dashboard.IsDisposed)
         {
-            _dashboard = new DashboardForm(_engine, _paths, _logger, _iconFactory.AppIcon);
+            _dashboard = new DashboardForm(
+                _engine,
+                _paths,
+                _logger,
+                _iconFactory.AppIcon,
+                _updateService,
+                RequestShutdownForUpdate);
             _dashboard.FormClosed += (_, _) => _dashboard = null;
         }
 
@@ -469,8 +493,100 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         _engine.Dispose();
         _vtClient.Dispose();
+        _updateService.Dispose();
         _iconFactory.Dispose();
 
         ExitThread();
+    }
+
+    private void SyncAutoUpdateConfiguration()
+    {
+        AppSettings settings = _engine.CurrentSettings;
+        if (_lastAutoUpdateEnabled == settings.AutoUpdateEnabled
+            && _lastAutoUpdateCriticalOnly == settings.AutoUpdateCriticalOnly
+            && string.Equals(_lastUpdateRepository, settings.UpdateRepository, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        _lastAutoUpdateEnabled = settings.AutoUpdateEnabled;
+        _lastAutoUpdateCriticalOnly = settings.AutoUpdateCriticalOnly;
+        _lastUpdateRepository = settings.UpdateRepository;
+
+        _updateService.ConfigureAutoUpdates(
+            settings,
+            () => _engine.IsScanning,
+            check => MarshalToUi(() =>
+            {
+                if (!_exiting)
+                {
+                    string kind = check.IsCritical ? "critical update" : "update";
+                    _notifyIcon.ShowBalloonTip(
+                        5000,
+                        "Installing VTDownloadGuard Update",
+                        $"Downloading {kind} {check.TagName}. Your settings and scan history will be preserved.",
+                        ToolTipIcon.Info);
+                }
+            }),
+            RequestShutdownForUpdate);
+    }
+
+    private async System.Threading.Tasks.Task CheckForUpdatesManuallyAsync()
+    {
+        if (_exiting)
+        {
+            return;
+        }
+
+        _checkUpdatesMenuItem.Enabled = false;
+        try
+        {
+            UpdateCheckResult result = await _updateService.CheckForUpdatesAsync(_engine.CurrentSettings);
+            if (_exiting)
+            {
+                return;
+            }
+
+            if (!result.Success)
+            {
+                _lastBalloonKind = BalloonKind.None;
+                _notifyIcon.ShowBalloonTip(6000, "Update Check Failed", result.ErrorMessage, ToolTipIcon.Warning);
+            }
+            else if (result.UpdateAvailable)
+            {
+                _lastBalloonKind = BalloonKind.UpdateAvailable;
+                string tag = string.IsNullOrWhiteSpace(result.TagName)
+                    ? $"v{result.LatestVersion?.ToString(3)}"
+                    : result.TagName;
+                string prefix = result.IsCritical ? "Critical update" : "Update";
+                _notifyIcon.ShowBalloonTip(
+                    8000,
+                    $"{prefix} Available: {tag}",
+                    "Click here to open Settings and install the update.",
+                    ToolTipIcon.Info);
+                ShowDashboard(tabIndex: SettingsTabIndex, focusApiKey: false);
+            }
+            else
+            {
+                _lastBalloonKind = BalloonKind.None;
+                _notifyIcon.ShowBalloonTip(
+                    5000,
+                    "VTDownloadGuard is Up to Date",
+                    $"You are running the latest version (v{_updateService.CurrentVersion.ToString(3)}).",
+                    ToolTipIcon.Info);
+            }
+        }
+        finally
+        {
+            if (!_exiting)
+            {
+                _checkUpdatesMenuItem.Enabled = true;
+            }
+        }
+    }
+
+    private void RequestShutdownForUpdate()
+    {
+        MarshalToUi(ExitApplication);
     }
 }

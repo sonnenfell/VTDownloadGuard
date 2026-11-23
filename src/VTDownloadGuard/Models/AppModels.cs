@@ -55,6 +55,33 @@ public enum AppThemeMode
     Light = 2
 }
 
+public enum UpdateInstallMode
+{
+    InnoInstaller = 0,
+    PortableFrameworkDependent = 1,
+    StandalonePortable = 2
+}
+
+public sealed class UpdateCheckResult
+{
+    public bool Success { get; init; }
+    public string ErrorMessage { get; init; } = string.Empty;
+    public bool UpdateAvailable { get; init; }
+    public bool IsCritical { get; init; }
+    public Version CurrentVersion { get; init; } = new(1, 0, 0);
+    public Version? LatestVersion { get; init; }
+    public string TagName { get; init; } = string.Empty;
+    public string ReleaseName { get; init; } = string.Empty;
+    public string ReleaseNotes { get; init; } = string.Empty;
+    public string ReleaseHtmlUrl { get; init; } = string.Empty;
+    public DateTimeOffset? PublishedAtUtc { get; init; }
+    public string AssetName { get; init; } = string.Empty;
+    public string DownloadUrl { get; init; } = string.Empty;
+    public long AssetSizeBytes { get; init; }
+    public string ExpectedSha256 { get; init; } = string.Empty;
+    public DateTimeOffset CheckedAtUtc { get; init; } = DateTimeOffset.UtcNow;
+}
+
 public sealed class FileRiskAssessment
 {
     public FileRiskCategory Category { get; init; } = FileRiskCategory.Medium;
@@ -197,6 +224,9 @@ public sealed class AppSettings
     public string EncryptedMalwareBazaarApiKey { get; set; } = string.Empty;
     public AppThemeMode ThemeMode { get; set; } = AppThemeMode.System;
     public bool OnboardingCompleted { get; set; } = false;
+    public bool AutoUpdateEnabled { get; set; } = false;
+    public bool AutoUpdateCriticalOnly { get; set; } = false;
+    public string UpdateRepository { get; set; } = "sonnenfell/VTDownloadGuard";
 
     public static string GetDefaultDownloadsDirectory()
     {
@@ -356,7 +386,10 @@ public sealed class AppSettings
             EnableMalwareBazaar = false,
             EncryptedMalwareBazaarApiKey = string.Empty,
             ThemeMode = AppThemeMode.System,
-            OnboardingCompleted = false
+            OnboardingCompleted = false,
+            AutoUpdateEnabled = false,
+            AutoUpdateCriticalOnly = false,
+            UpdateRepository = "sonnenfell/VTDownloadGuard"
         };
     }
 
@@ -382,7 +415,10 @@ public sealed class AppSettings
             EnableMalwareBazaar = EnableMalwareBazaar,
             EncryptedMalwareBazaarApiKey = EncryptedMalwareBazaarApiKey,
             ThemeMode = ThemeMode,
-            OnboardingCompleted = OnboardingCompleted
+            OnboardingCompleted = OnboardingCompleted,
+            AutoUpdateEnabled = AutoUpdateEnabled,
+            AutoUpdateCriticalOnly = AutoUpdateCriticalOnly,
+            UpdateRepository = UpdateRepository
         };
     }
 }
