@@ -1003,6 +1003,15 @@ public sealed class SmoothTableLayoutPanel : TableLayoutPanel
     }
 }
 
+public sealed class SmoothPanel : Panel
+{
+    public SmoothPanel()
+    {
+        DoubleBuffered = true;
+        SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
+    }
+}
+
 internal static class MouseWheelScrollForwarder
 {
     internal const int WmMouseWheel = 0x020A;

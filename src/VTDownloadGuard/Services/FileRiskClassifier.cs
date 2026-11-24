@@ -244,6 +244,16 @@ public sealed class FileRiskClassifier
         _ => category.ToString()
     };
 
+    public static int GetDefaultScore(FileRiskCategory category) => category switch
+    {
+        FileRiskCategory.Critical => 90,
+        FileRiskCategory.High => 74,
+        FileRiskCategory.Medium => 48,
+        FileRiskCategory.Low => 25,
+        FileRiskCategory.Trusted => 10,
+        _ => 45
+    };
+
     public FileRiskAssessment Classify(string filePath, long? knownFileSizeBytes = null)
     {
         if (string.IsNullOrWhiteSpace(filePath))

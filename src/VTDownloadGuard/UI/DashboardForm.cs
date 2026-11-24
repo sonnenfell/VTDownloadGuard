@@ -20,9 +20,10 @@ public sealed class DashboardForm : Form
     private const int TabApi = 3;
     private const int TabSettings = 4;
     private const int WmSetRedraw = 0x000B;
-    private const int WsExComposited = 0x02000000;
     private const uint RdwInvalidate = 0x0001;
+    private const uint RdwErase = 0x0004;
     private const uint RdwAllChildren = 0x0080;
+    private const uint RdwUpdateNow = 0x0100;
     private const uint RdwFrame = 0x0400;
     private const string UnsavedChangesText = "Unsaved changes - click Save Settings to apply.";
 
@@ -209,16 +210,6 @@ public sealed class DashboardForm : Form
     private readonly List<(Control Card, TableLayoutPanel Inner)> _responsiveCards = [];
     private readonly ToolTip _settingsToolTip = new();
 
-    protected override CreateParams CreateParams
-    {
-        get
-        {
-            CreateParams cp = base.CreateParams;
-            cp.ExStyle |= WsExComposited;
-            return cp;
-        }
-    }
-
     public DashboardForm(
         ScanEngine engine,
         AppPaths paths,
@@ -252,7 +243,7 @@ public sealed class DashboardForm : Form
             }
         };
 
-        var root = new TableLayoutPanel
+        var root = new SmoothTableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
@@ -424,7 +415,7 @@ public sealed class DashboardForm : Form
         root.Controls.Add(_navBar, 0, 1);
 
         // Content Host
-        _contentHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(14, 12, 14, 8) };
+        _contentHost = new SmoothPanel { Dock = DockStyle.Fill, Padding = new Padding(14, 12, 14, 8) };
         root.Controls.Add(_contentHost, 0, 2);
 
         // Build Tab Views
@@ -551,7 +542,7 @@ public sealed class DashboardForm : Form
         }
 
         // Footer Bar
-        _footerPanel = new Panel
+        _footerPanel = new SmoothPanel
         {
             Dock = DockStyle.Fill,
             AutoSize = true,
@@ -596,6 +587,7 @@ public sealed class DashboardForm : Form
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
+        Update();
         if (!_tabsPrewarmed)
         {
             _tabsPrewarmed = true;
@@ -616,17 +608,25 @@ public sealed class DashboardForm : Form
             return;
         }
 
-        SetRedraw(_contentHost, false);
-        try
+        if (!_tabViews[TabApi].Visible)
         {
             UpdateResponsiveCards(_apiScrollPanel, force: true);
-            UpdateResponsiveCards(_settingsScrollPanel, force: true);
-            EnsureHandlesCreatedRecursive(_tabViews[TabSettings]);
             EnsureHandlesCreatedRecursive(_tabViews[TabApi]);
         }
-        finally
+
+        if (!_tabViews[TabSettings].Visible)
         {
-            SetRedraw(_contentHost, true);
+            UpdateResponsiveCards(_settingsScrollPanel, force: true);
+            EnsureHandlesCreatedRecursive(_tabViews[TabSettings]);
+        }
+
+        if (_tabViews[_activeTabIndex].IsHandleCreated && !_tabViews[_activeTabIndex].IsDisposed)
+        {
+            _ = RedrawWindow(
+                _tabViews[_activeTabIndex].Handle,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                RdwInvalidate | RdwErase | RdwFrame | RdwAllChildren | RdwUpdateNow);
         }
     }
 
@@ -866,7 +866,7 @@ public sealed class DashboardForm : Form
             SetRedraw(_contentHost, true);
             if (_tabViews[tabIndex].IsHandleCreated && !_tabViews[tabIndex].IsDisposed)
             {
-                _ = RedrawWindow(_tabViews[tabIndex].Handle, IntPtr.Zero, IntPtr.Zero, RdwInvalidate | RdwFrame | RdwAllChildren);
+                _ = RedrawWindow(_tabViews[tabIndex].Handle, IntPtr.Zero, IntPtr.Zero, RdwInvalidate | RdwErase | RdwFrame | RdwAllChildren | RdwUpdateNow);
             }
         }
 
@@ -949,13 +949,13 @@ public sealed class DashboardForm : Form
         ModernButton UploadBtn,
         ModernButton ClearBtn) BuildRecentScansTab()
     {
-        var view = new Panel { Dock = DockStyle.Fill };
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
+        var view = new SmoothPanel { Dock = DockStyle.Fill };
+        var layout = new SmoothTableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 118));
 
-        var filterPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 0, 0, 8) };
+        var filterPanel = new SmoothPanel { Dock = DockStyle.Fill, Padding = new Padding(0, 0, 0, 8) };
         var searchBox = new TextBox
         {
             Width = 360,
@@ -1086,8 +1086,8 @@ public sealed class DashboardForm : Form
         ModernButton ScanFileBtn,
         ModernButton ScanFolderBtn) BuildQueuedTab()
     {
-        var view = new Panel { Dock = DockStyle.Fill };
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
+        var view = new SmoothPanel { Dock = DockStyle.Fill };
+        var layout = new SmoothTableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
@@ -1203,8 +1203,8 @@ public sealed class DashboardForm : Form
         ModernButton ScanSelectedBtn,
         ModernButton OpenDirBtn) BuildDirectoriesTab()
     {
-        var view = new Panel { Dock = DockStyle.Fill };
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+        var view = new SmoothPanel { Dock = DockStyle.Fill };
+        var layout = new SmoothTableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
 
@@ -1287,7 +1287,7 @@ public sealed class DashboardForm : Form
         ModernButton OpenDataBtn,
         DataGridView SecondaryGrid) BuildApiTab()
     {
-        var view = new Panel { Dock = DockStyle.Fill };
+        var view = new SmoothPanel { Dock = DockStyle.Fill };
         var scroll = new SmoothFlowLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -1473,7 +1473,7 @@ public sealed class DashboardForm : Form
         ModernButton ResetDefaultsBtn,
         Label SaveConfirmLabel) BuildSettingsTab()
     {
-        var view = new Panel { Dock = DockStyle.Fill };
+        var view = new SmoothPanel { Dock = DockStyle.Fill };
         var root = new SmoothTableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -1526,70 +1526,7 @@ public sealed class DashboardForm : Form
         helpButtonsRow.Controls.AddRange([runWizardBtn, startTourBtn]);
         setupTable.Controls.Add(helpButtonsRow, 0, sh);
 
-        // Card 1: General and Appearance
-        var generalCard = CreateResponsiveCard(scroll, out TableLayoutPanel genTable, 1);
-        genTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-
-        int gr = 0;
-        var genTitle = new Label { Text = "General and Appearance", Font = _sectionTitleFont, AutoSize = true, Margin = new Padding(0, 0, 0, 10) };
-        genTable.Controls.Add(genTitle, 0, gr++);
-
-        AddSettingFieldHeader(genTable, ref gr, "Color theme", addTopSpacing: false);
-        var themeCombo = new NoWheelComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 280, Margin = new Padding(0, 0, 0, 4) };
-        themeCombo.Items.AddRange(["Follow Windows theme *", "Dark (VirusTotal style)", "Light"]);
-        themeCombo.SelectedIndexChanged += (_, _) =>
-        {
-            UpdateRecommendedStarIndicators();
-            MarkSettingsDirty();
-        };
-        genTable.Controls.Add(WrapWithRecommendedStar(
-            themeCombo,
-            "Follow Windows theme",
-            () => themeCombo.SelectedIndex == (int)AppThemeMode.System), 0, gr++);
-
-        AddSectionDivider(genTable, ref gr);
-
-        AddSettingFieldHeader(genTable, ref gr, "Windows startup", addTopSpacing: false);
-        var startupCheck = new CheckBox
-        {
-            Text = "Start automatically minimized to system tray when Windows starts",
-            AutoSize = true,
-            Margin = new Padding(0, 2, 0, 4)
-        };
-        startupCheck.CheckedChanged += (_, _) =>
-        {
-            UpdateRecommendedStarIndicators();
-            MarkSettingsDirty();
-        };
-        genTable.Controls.Add(WrapWithRecommendedStar(
-            startupCheck,
-            "Enabled",
-            () => startupCheck.Checked), 0, gr++);
-
-        AddSectionDivider(genTable, ref gr);
-
-        AddSettingFieldHeader(genTable, ref gr, "Clicking app icon or title", addTopSpacing: false);
-        var brandClickActionCombo = new NoWheelComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 280, Margin = new Padding(0, 0, 0, 4) };
-        brandClickActionCombo.Items.AddRange(
-        [
-            "Open Recent Scans *",
-            "Open Queued",
-            "Open Directories",
-            "Open API",
-            "Open Settings",
-            "Toggle monitoring on/off"
-        ]);
-        brandClickActionCombo.SelectedIndexChanged += (_, _) =>
-        {
-            UpdateRecommendedStarIndicators();
-            ApplyBrandClickActionSelection();
-        };
-        genTable.Controls.Add(WrapWithRecommendedStar(
-            brandClickActionCombo,
-            "Open Recent Scans",
-            () => brandClickActionCombo.SelectedIndex == (int)HeaderBrandClickAction.OpenRecentScans), 0, gr);
-
-        // Card 2: Updates
+        // Card 1: Updates
         var updatesCard = CreateResponsiveCard(scroll, out TableLayoutPanel updTable, 1);
         updTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
@@ -1682,6 +1619,69 @@ public sealed class DashboardForm : Form
             Margin = new Padding(0, 4, 0, 2)
         };
         updTable.Controls.Add(updateHelperLabel, 0, ur++);
+
+        // Card 2: General and Appearance
+        var generalCard = CreateResponsiveCard(scroll, out TableLayoutPanel genTable, 1);
+        genTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+        int gr = 0;
+        var genTitle = new Label { Text = "General and Appearance", Font = _sectionTitleFont, AutoSize = true, Margin = new Padding(0, 0, 0, 10) };
+        genTable.Controls.Add(genTitle, 0, gr++);
+
+        AddSettingFieldHeader(genTable, ref gr, "Color theme", addTopSpacing: false);
+        var themeCombo = new NoWheelComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 280, Margin = new Padding(0, 0, 0, 4) };
+        themeCombo.Items.AddRange(["Follow Windows theme *", "Dark (VirusTotal style)", "Light"]);
+        themeCombo.SelectedIndexChanged += (_, _) =>
+        {
+            UpdateRecommendedStarIndicators();
+            MarkSettingsDirty();
+        };
+        genTable.Controls.Add(WrapWithRecommendedStar(
+            themeCombo,
+            "Follow Windows theme",
+            () => themeCombo.SelectedIndex == (int)AppThemeMode.System), 0, gr++);
+
+        AddSectionDivider(genTable, ref gr);
+
+        AddSettingFieldHeader(genTable, ref gr, "Windows startup", addTopSpacing: false);
+        var startupCheck = new CheckBox
+        {
+            Text = "Start automatically minimized to system tray when Windows starts",
+            AutoSize = true,
+            Margin = new Padding(0, 2, 0, 4)
+        };
+        startupCheck.CheckedChanged += (_, _) =>
+        {
+            UpdateRecommendedStarIndicators();
+            MarkSettingsDirty();
+        };
+        genTable.Controls.Add(WrapWithRecommendedStar(
+            startupCheck,
+            "Enabled",
+            () => startupCheck.Checked), 0, gr++);
+
+        AddSectionDivider(genTable, ref gr);
+
+        AddSettingFieldHeader(genTable, ref gr, "Clicking app icon or title", addTopSpacing: false);
+        var brandClickActionCombo = new NoWheelComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 280, Margin = new Padding(0, 0, 0, 4) };
+        brandClickActionCombo.Items.AddRange(
+        [
+            "Open Recent Scans *",
+            "Open Queued",
+            "Open Directories",
+            "Open API",
+            "Open Settings",
+            "Toggle monitoring on/off"
+        ]);
+        brandClickActionCombo.SelectedIndexChanged += (_, _) =>
+        {
+            UpdateRecommendedStarIndicators();
+            ApplyBrandClickActionSelection();
+        };
+        genTable.Controls.Add(WrapWithRecommendedStar(
+            brandClickActionCombo,
+            "Open Recent Scans",
+            () => brandClickActionCombo.SelectedIndex == (int)HeaderBrandClickAction.OpenRecentScans), 0, gr);
 
         // Card 3: VirusTotal Configuration
         var vtCard = CreateResponsiveCard(scroll, out TableLayoutPanel vtTable, 1);
@@ -2465,6 +2465,14 @@ public sealed class DashboardForm : Form
         }
     }
 
+    private void SetToolTipIfChanged(Control control, string tip)
+    {
+        if (!string.Equals(_settingsToolTip.GetToolTip(control), tip, StringComparison.Ordinal))
+        {
+            _settingsToolTip.SetToolTip(control, tip);
+        }
+    }
+
     private void UpdateHeaderToolTips()
     {
         string tip = _engine.CurrentSettings.HeaderBrandClickAction switch
@@ -2476,8 +2484,8 @@ public sealed class DashboardForm : Form
             HeaderBrandClickAction.ToggleMonitoring => "Click to pause or resume monitoring",
             _ => "Click to open Recent Scans"
         };
-        _settingsToolTip.SetToolTip(_logoBox, tip);
-        _settingsToolTip.SetToolTip(_titleLabel, tip);
+        SetToolTipIfChanged(_logoBox, tip);
+        SetToolTipIfChanged(_titleLabel, tip);
     }
 
     private void RefreshHeaderStatus()
@@ -2485,57 +2493,108 @@ public sealed class DashboardForm : Form
         TrayStatus status = _engine.CurrentTrayStatus;
         bool paused = _engine.IsPaused;
 
-        _headerPauseBtn.Text = paused ? "Resume" : "Pause";
-        _acknowledgeBtn.Visible = status == TrayStatus.Unsafe;
-        _subtitleLabel.Cursor = Cursors.Default;
-        _subtitleLabel.Font = _smallFont;
-        _subtitleLabel.ForeColor = _palette.TextSecondary;
-        _settingsToolTip.SetToolTip(_subtitleLabel, string.Empty);
+        string pauseText = paused ? "Resume" : "Pause";
+        if (!string.Equals(_headerPauseBtn.Text, pauseText, StringComparison.Ordinal))
+        {
+            _headerPauseBtn.Text = pauseText;
+        }
+
+        bool ackVisible = status == TrayStatus.Unsafe;
+        if (_acknowledgeBtn.Visible != ackVisible)
+        {
+            _acknowledgeBtn.Visible = ackVisible;
+        }
+
         UpdateHeaderToolTips();
+
+        string pillText;
+        Color pillBg;
+        Color pillFg;
+        string subtitleText;
+        Color subtitleFg = _palette.TextSecondary;
+        Cursor subtitleCursor = Cursors.Default;
+        string subtitleTip = string.Empty;
 
         if (status == TrayStatus.Unsafe)
         {
             int count = _engine.UnacknowledgedUnsafeCount;
-            _statusPillLabel.Text = count == 1 ? "UNSAFE FILE DETECTED" : $"{count} UNSAFE FILES";
-            _statusPillLabel.BackColor = _palette.DangerBg;
-            _statusPillLabel.ForeColor = _palette.DangerRed;
-            _subtitleLabel.Text = _engine.LatestUnacknowledgedUnsafe?.FileName ?? "Review scan alerts below.";
+            pillText = count == 1 ? "UNSAFE FILE DETECTED" : $"{count} UNSAFE FILES";
+            pillBg = _palette.DangerBg;
+            pillFg = _palette.DangerRed;
+            subtitleText = _engine.LatestUnacknowledgedUnsafe?.FileName ?? "Review scan alerts below.";
         }
         else if (status == TrayStatus.NeedsSetup)
         {
-            _statusPillLabel.Text = "SETUP NEEDED";
-            _statusPillLabel.BackColor = _palette.WarningBg;
-            _statusPillLabel.ForeColor = _palette.WarningAmber;
-            _subtitleLabel.Text = "Open Settings and enter your free VirusTotal API key to begin scanning.";
+            pillText = "SETUP NEEDED";
+            pillBg = _palette.WarningBg;
+            pillFg = _palette.WarningAmber;
+            subtitleText = "Open Settings and enter your free VirusTotal API key to begin scanning.";
         }
         else if (status == TrayStatus.Scanning)
         {
             int queued = _engine.QueuedCount;
             string active = _engine.ActiveFileName ?? "Queued file";
             string stage = string.IsNullOrWhiteSpace(_engine.ActiveStage) ? "Scanning..." : _engine.ActiveStage;
-            _statusPillLabel.Text = queued > 0 ? $"SCANNING ({queued} QUEUED)" : "SCANNING";
-            _statusPillLabel.BackColor = _palette.AccentBlueBg;
-            _statusPillLabel.ForeColor = _palette.AccentBlue;
-            _subtitleLabel.Text = $"{active}: {stage}";
+            pillText = queued > 0 ? $"SCANNING ({queued} QUEUED)" : "SCANNING";
+            pillBg = _palette.AccentBlueBg;
+            pillFg = _palette.AccentBlue;
+            subtitleText = $"{active}: {stage}";
         }
         else if (paused)
         {
-            _statusPillLabel.Text = "PAUSED";
-            _statusPillLabel.BackColor = _palette.NeutralBg;
-            _statusPillLabel.ForeColor = _palette.NeutralSlate;
-            _subtitleLabel.Text = "Folder monitoring is paused. Click here to resume.";
-            _subtitleLabel.Cursor = Cursors.Hand;
-            _subtitleLabel.ForeColor = _palette.AccentBlue;
-            _settingsToolTip.SetToolTip(_subtitleLabel, "Click to turn folder monitoring back on");
+            pillText = "PAUSED";
+            pillBg = _palette.NeutralBg;
+            pillFg = _palette.NeutralSlate;
+            subtitleText = "Folder monitoring is paused. Click here to resume.";
+            subtitleCursor = Cursors.Hand;
+            subtitleFg = _palette.AccentBlue;
+            subtitleTip = "Click to turn folder monitoring back on";
         }
         else
         {
             int activeFolders = _engine.CurrentSettings.WatchedDirectories.Count(d => d.Enabled);
-            _statusPillLabel.Text = "PROTECTED";
-            _statusPillLabel.BackColor = _palette.SuccessBg;
-            _statusPillLabel.ForeColor = _palette.SuccessGreen;
-            _subtitleLabel.Text = $"Watching {activeFolders} active folder(s). Everything checked and safe.";
+            pillText = "PROTECTED";
+            pillBg = _palette.SuccessBg;
+            pillFg = _palette.SuccessGreen;
+            subtitleText = $"Watching {activeFolders} active folder(s). Everything checked and safe.";
         }
+
+        if (!string.Equals(_statusPillLabel.Text, pillText, StringComparison.Ordinal))
+        {
+            _statusPillLabel.Text = pillText;
+        }
+
+        if (_statusPillLabel.BackColor != pillBg)
+        {
+            _statusPillLabel.BackColor = pillBg;
+        }
+
+        if (_statusPillLabel.ForeColor != pillFg)
+        {
+            _statusPillLabel.ForeColor = pillFg;
+        }
+
+        if (!string.Equals(_subtitleLabel.Text, subtitleText, StringComparison.Ordinal))
+        {
+            _subtitleLabel.Text = subtitleText;
+        }
+
+        if (_subtitleLabel.ForeColor != subtitleFg)
+        {
+            _subtitleLabel.ForeColor = subtitleFg;
+        }
+
+        if (_subtitleLabel.Cursor != subtitleCursor)
+        {
+            _subtitleLabel.Cursor = subtitleCursor;
+        }
+
+        if (_subtitleLabel.Font != _smallFont && !(paused && status != TrayStatus.Unsafe && status != TrayStatus.NeedsSetup && status != TrayStatus.Scanning))
+        {
+            _subtitleLabel.Font = _smallFont;
+        }
+
+        SetToolTipIfChanged(_subtitleLabel, subtitleTip);
     }
 
     private void UpdateQueueBadge()
@@ -2708,6 +2767,7 @@ public sealed class DashboardForm : Form
             _openLocationBtn.Enabled = false;
             _scanOnVtBtn.Enabled = false;
             _uploadSelectedBtn.Enabled = false;
+            SetToolTipIfChanged(_uploadSelectedBtn, string.Empty);
             return;
         }
 
@@ -2726,7 +2786,23 @@ public sealed class DashboardForm : Form
         _openReportBtn.Enabled = !string.IsNullOrWhiteSpace(rec.EffectiveReportUrl);
         _openLocationBtn.Enabled = fileExists;
         _scanOnVtBtn.Enabled = fileExists && _engine.HasApiKey;
-        _uploadSelectedBtn.Enabled = fileExists && _engine.HasApiKey && rec.Verdict == ScanVerdict.Unknown;
+        bool canAttemptUpload = fileExists && rec.Verdict is ScanVerdict.Unknown or ScanVerdict.Skipped or ScanVerdict.Error;
+        _uploadSelectedBtn.Enabled = canAttemptUpload;
+
+        string uploadTip = !fileExists
+            ? "File no longer exists on disk."
+            : !canAttemptUpload
+                ? "Upload to VT is available for Unknown, Skipped, or Error results."
+                : ScanEngine.EvaluateManualUpload(rec.FileSizeBytes, true, _engine.HasApiKey) switch
+                {
+                    ManualUploadStrategy.DirectApiUpload => "Upload this file to VirusTotal for full antivirus analysis.",
+                    ManualUploadStrategy.LargeApiUpload => "Large file (over 32 MB): click for automatic large-file upload or manual browser assistance.",
+                    ManualUploadStrategy.ManualBrowserOnlyNoKey => "No VirusTotal API key configured: click for browser upload and Settings options.",
+                    ManualUploadStrategy.ExceedsVirusTotalLimit => "File exceeds VirusTotal's 650 MB upload limit: click for hash and inspection options.",
+                    ManualUploadStrategy.EmptyFile => "Empty files (0 bytes) cannot be uploaded.",
+                    _ => "Upload this file to VirusTotal."
+                };
+        SetToolTipIfChanged(_uploadSelectedBtn, uploadTip);
     }
 
     private void RefreshQueueGrid()
@@ -3121,9 +3197,19 @@ public sealed class DashboardForm : Form
             return;
         }
 
+        RevealFileInExplorer(rec.FilePath);
+    }
+
+    private void RevealFileInExplorer(string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
+        {
+            return;
+        }
+
         try
         {
-            Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{rec.FilePath}\"")
+            Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{filePath}\"")
             {
                 UseShellExecute = true
             });
@@ -3146,9 +3232,89 @@ public sealed class DashboardForm : Form
     private void UploadSelectedRecord()
     {
         ScanRecord? rec = GetSelectedScanRecord();
-        if (rec is not null && File.Exists(rec.FilePath))
+        if (rec is null)
         {
-            _engine.ManualUploadRecord(rec);
+            return;
+        }
+
+        bool exists = false;
+        long actualSize = rec.FileSizeBytes;
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(rec.FilePath))
+            {
+                var info = new FileInfo(rec.FilePath);
+                exists = info.Exists;
+                if (exists)
+                {
+                    actualSize = info.Length;
+                }
+            }
+        }
+        catch
+        {
+            exists = false;
+        }
+
+        ManualUploadStrategy strategy = ScanEngine.EvaluateManualUpload(actualSize, exists, _engine.HasApiKey);
+        switch (strategy)
+        {
+            case ManualUploadStrategy.FileMissing:
+                MessageBox.Show(
+                    this,
+                    "The selected file could not be found on disk. It may have been moved or deleted.",
+                    "File Not Found",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                UpdateHistorySelectionDetails();
+                return;
+
+            case ManualUploadStrategy.EmptyFile:
+                MessageBox.Show(
+                    this,
+                    "Empty files (0 bytes) cannot be uploaded to VirusTotal.",
+                    "Cannot Upload Empty File",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+
+            case ManualUploadStrategy.DirectApiUpload:
+                if (_engine.ManualUploadRecord(rec))
+                {
+                    SelectTab(TabQueued);
+                }
+
+                return;
+
+            default:
+                using (var dlg = new ManualUploadAssistDialog(rec, actualSize, strategy, _palette, Icon!))
+                {
+                    _ = dlg.ShowDialog(this);
+                    switch (dlg.SelectedAction)
+                    {
+                        case ManualUploadAssistAction.UploadViaApi:
+                            if (_engine.ManualUploadRecord(rec))
+                            {
+                                SelectTab(TabQueued);
+                            }
+
+                            break;
+                        case ManualUploadAssistAction.OpenBrowserAndRevealFile:
+                            OpenUrl(VirusTotalClient.GuiUploadUrl);
+                            RevealFileInExplorer(rec.FilePath);
+                            break;
+                        case ManualUploadAssistAction.OpenHashReport:
+                            OpenUrl(!string.IsNullOrWhiteSpace(rec.Sha256)
+                                ? VirusTotalClient.BuildGuiFileUrl(rec.Sha256)
+                                : VirusTotalClient.GuiSearchUrl);
+                            break;
+                        case ManualUploadAssistAction.OpenSettings:
+                            SelectTab(TabSettings, focusApiKey: true);
+                            break;
+                    }
+                }
+
+                break;
         }
     }
 
@@ -3569,6 +3735,31 @@ public sealed class DashboardForm : Form
     }
 
     public int ActiveTabIndex => _activeTabIndex;
+
+    public bool UsesCompositedExStyleForTest() => (CreateParams.ExStyle & 0x02000000) != 0;
+
+    public IReadOnlyList<string> GetSettingsCardTitlesForTest()
+    {
+        var titles = new List<string>();
+        foreach (Control card in _settingsScrollPanel.Controls)
+        {
+            if (card is not ModernCardPanel)
+            {
+                continue;
+            }
+
+            foreach (Control child in card.Controls)
+            {
+                if (child is TableLayoutPanel table && table.Controls.Count > 0 && table.Controls[0] is Label titleLabel)
+                {
+                    titles.Add(titleLabel.Text);
+                    break;
+                }
+            }
+        }
+
+        return titles;
+    }
 
     public (int HeaderBottom, int NavTop, int SubtitleBottom, int HeaderHeight, int ScanBtnBottom) GetHeaderLayoutMetricsForTest()
     {

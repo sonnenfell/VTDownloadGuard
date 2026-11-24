@@ -63,6 +63,7 @@ internal static class Program
             ("FileRiskClassifier heuristic categories and Windows Authenticode", TestFileRiskClassifier),
             ("SecondaryHashLookupService CIRCL, MetaDefender, MalwareBazaar, and policy", TestSecondaryHashLookupService),
             ("VirusTotalClient verdicts, upload polling, quota endpoint, auth, and 429 retry", TestVirusTotalClient),
+            ("Manual upload evaluation and large-file upload flow", TestManualUploadEvaluationAndLargeFileUpload),
             ("RateLimiter sliding window enforcement and snapshot", TestRateLimiter),
             ("Priority queue ordering, promote, remove, and clear", TestPriorityQueueOrdering),
             ("Manual folder scanning recursively queues filtered files in priority order", TestManualFolderQueueing),
@@ -675,6 +676,127 @@ internal static class Program
 
             var retryRes = await vt3.LookupHashAsync("retryhash", "key", CancellationToken.None);
             Assert(retryRes.Outcome == VtOutcome.Found && attempt429 == 2, "Expected 429 retry to succeed.");
+        }
+        finally
+        {
+            CleanupDir(tempDir);
+        }
+    }
+
+    private static async Task TestManualUploadEvaluationAndLargeFileUpload()
+    {
+        Assert(ScanEngine.EvaluateManualUpload(1024, fileExists: false, hasApiKey: true) == ManualUploadStrategy.FileMissing,
+            "Missing file must evaluate to FileMissing.");
+        Assert(ScanEngine.EvaluateManualUpload(0, fileExists: true, hasApiKey: true) == ManualUploadStrategy.EmptyFile,
+            "Zero-byte file must evaluate to EmptyFile.");
+        Assert(ScanEngine.EvaluateManualUpload(10L * 1024 * 1024, fileExists: true, hasApiKey: true) == ManualUploadStrategy.DirectApiUpload,
+            "10 MB file with API key must evaluate to DirectApiUpload.");
+        Assert(ScanEngine.EvaluateManualUpload(50L * 1024 * 1024, fileExists: true, hasApiKey: true) == ManualUploadStrategy.LargeApiUpload,
+            "50 MB file with API key must evaluate to LargeApiUpload.");
+        Assert(ScanEngine.EvaluateManualUpload(50L * 1024 * 1024, fileExists: true, hasApiKey: false) == ManualUploadStrategy.ManualBrowserOnlyNoKey,
+            "50 MB file without API key must evaluate to ManualBrowserOnlyNoKey.");
+        Assert(ScanEngine.EvaluateManualUpload(700L * 1024 * 1024, fileExists: true, hasApiKey: true) == ManualUploadStrategy.ExceedsVirusTotalLimit,
+            "700 MB file must evaluate to ExceedsVirusTotalLimit.");
+
+        string tempDir = CreateTempDir();
+        string dataDir = Path.Combine(tempDir, "Data");
+        try
+        {
+            var paths = new AppPaths(dataDir, Path.Combine(tempDir, "UpdateStaging"));
+            var logger = new AppLogger(paths);
+            var settingsStore = new SettingsStore(paths, logger);
+            var settings = new AppSettings
+            {
+                WatchedDirectories = [],
+                UploadPolicy = UploadPolicy.HashLookupOnly,
+                MaxUploadSizeMb = 1,
+                MaxHashSizeMb = 1,
+                EnableCirclHashlookup = false,
+                MaxRequestsPerMinute = 100
+            };
+            SettingsStore.SetApiKey(settings, "vt-test-key");
+            settingsStore.Save(settings);
+
+            var history = new HistoryAndCacheStore(paths, logger);
+            var limiter = new RateLimiter(100);
+
+            string samplePath = Path.Combine(tempDir, "large-manual.exe");
+            byte[] payload = new byte[256];
+            Array.Fill(payload, (byte)'A');
+            await File.WriteAllBytesAsync(samplePath, payload);
+
+            bool requestedUploadUrl = false;
+            bool postedToUploadUrl = false;
+            int uploadedContentLength = 0;
+
+            var handler = new MockHttpHandler(async (req, _) =>
+            {
+                if (req.Method == HttpMethod.Get && req.RequestUri!.AbsolutePath.EndsWith("/files/upload_url"))
+                {
+                    requestedUploadUrl = true;
+                    return JsonResponse(HttpStatusCode.OK, """{"data":"https://upload.example.test/large-slot"}""");
+                }
+
+                if (req.Method == HttpMethod.Post && req.RequestUri!.ToString() == "https://upload.example.test/large-slot")
+                {
+                    postedToUploadUrl = true;
+                    byte[] bodyBytes = await req.Content!.ReadAsByteArrayAsync();
+                    uploadedContentLength = bodyBytes.Length;
+                    return JsonResponse(HttpStatusCode.OK, """{"data":{"type":"analysis","id":"large-analysis-1"}}""");
+                }
+
+                if (req.Method == HttpMethod.Get && req.RequestUri!.AbsolutePath.EndsWith("/analyses/large-analysis-1"))
+                {
+                    return JsonResponse(HttpStatusCode.OK, MakeAnalysisReportJson("completed", 0, 0, 70, 0));
+                }
+
+                return JsonResponse(HttpStatusCode.BadRequest, "{}");
+            });
+
+            using var vtClient = new VirusTotalClient(
+                limiter,
+                logger,
+                new HttpClient(handler),
+                initialAnalysisDelay: TimeSpan.FromMilliseconds(5),
+                analysisPollInterval: TimeSpan.FromMilliseconds(5),
+                rateLimitFallbackDelay: TimeSpan.FromMilliseconds(20),
+                directUploadLimitBytes: 64);
+
+            using var engine = new ScanEngine(settingsStore, history, limiter, vtClient, logger);
+            var sawUploadProgress = false;
+            var completedTcs = new TaskCompletionSource<ScanRecord>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            engine.StatusChanged += () =>
+            {
+                if (engine.ActiveStage.Contains("Uploading to VirusTotal", StringComparison.Ordinal))
+                {
+                    sawUploadProgress = true;
+                }
+            };
+            engine.ScanCompleted += rec => completedTcs.TrySetResult(rec);
+
+            engine.Start();
+
+            var missingRecord = new ScanRecord { FilePath = Path.Combine(tempDir, "missing.exe") };
+            Assert(!engine.ManualUploadRecord(missingRecord), "ManualUploadRecord must return false for missing file.");
+
+            var unknownRecord = new ScanRecord
+            {
+                FilePath = samplePath,
+                FileName = "large-manual.exe",
+                FileSizeBytes = payload.Length,
+                Verdict = ScanVerdict.Unknown,
+                RiskCategory = FileRiskCategory.High,
+                RiskReason = "Unsigned installer"
+            };
+            Assert(engine.ManualUploadRecord(unknownRecord), "ManualUploadRecord should enqueue existing file.");
+
+            ScanRecord completed = await completedTcs.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert(requestedUploadUrl, "Large upload flow must request /files/upload_url.");
+            Assert(postedToUploadUrl && uploadedContentLength >= payload.Length, "Large upload flow must stream multipart body to returned upload URL.");
+            Assert(sawUploadProgress, "Upload progress updates should reach engine status.");
+            Assert(completed.Uploaded && completed.Verdict == ScanVerdict.Clean && completed.TotalEngines == 70,
+                $"Expected Clean uploaded result with 70 engines, got {completed.Verdict} (Uploaded={completed.Uploaded}, Total={completed.TotalEngines}).");
         }
         finally
         {
@@ -1626,6 +1748,22 @@ internal static class Program
                 using var form = new DashboardForm(engine, paths, logger, icons.AppIcon, updateSvc);
                 form.CreateControl();
                 form.PerformLayout();
+                Assert(!form.UsesCompositedExStyleForTest(),
+                    "DashboardForm must not use WS_EX_COMPOSITED (prevents black startup frames and dropdown border flicker).");
+
+                IReadOnlyList<string> expectedCardOrder =
+                [
+                    "Setup and Help",
+                    "Updates",
+                    "General and Appearance",
+                    "VirusTotal Configuration",
+                    "Secondary Hash Lookup Services",
+                    "Reset Settings"
+                ];
+                IReadOnlyList<string> actualCardOrder = form.GetSettingsCardTitlesForTest();
+                Assert(actualCardOrder.SequenceEqual(expectedCardOrder),
+                    $"Unexpected Settings card order: [{string.Join(", ", actualCardOrder)}].");
+
                 var darkMetrics = form.GetHeaderLayoutMetricsForTest();
                 Assert(darkMetrics.HeaderBottom <= darkMetrics.NavTop,
                     $"Header ({darkMetrics.HeaderBottom}) must not overlap nav tabs ({darkMetrics.NavTop}).");
@@ -1733,6 +1871,33 @@ internal static class Program
                 {
                     onboardingLight.ShowStep(1);
                     onboardingLight.PerformLayout();
+                }
+
+                // Exercise ManualUploadAssistDialog across all 3 strategy modes in Dark and Light themes
+                var sampleRec = new ScanRecord
+                {
+                    FilePath = Path.Combine(tempDir, "large-installer.exe"),
+                    FileName = "large-installer.exe",
+                    Sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    FileSizeBytes = 120L * 1024 * 1024,
+                    Verdict = ScanVerdict.Unknown
+                };
+                foreach (ThemePalette pal in new[] { ThemePalette.Dark, ThemePalette.Light })
+                {
+                    foreach (ManualUploadStrategy strat in new[]
+                    {
+                        ManualUploadStrategy.LargeApiUpload,
+                        ManualUploadStrategy.ManualBrowserOnlyNoKey,
+                        ManualUploadStrategy.ExceedsVirusTotalLimit
+                    })
+                    {
+                        long testSize = strat == ManualUploadStrategy.ExceedsVirusTotalLimit
+                            ? 750L * 1024 * 1024
+                            : 120L * 1024 * 1024;
+                        using var assistDlg = new ManualUploadAssistDialog(sampleRec, testSize, strat, pal, icons.AppIcon);
+                        assistDlg.CreateControl();
+                        assistDlg.PerformLayout();
+                    }
                 }
             }
             catch (Exception ex)

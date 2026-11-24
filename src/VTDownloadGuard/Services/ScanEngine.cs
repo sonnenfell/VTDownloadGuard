@@ -9,6 +9,16 @@ using VTDownloadGuard.Models;
 
 namespace VTDownloadGuard.Services;
 
+public enum ManualUploadStrategy
+{
+    FileMissing = 0,
+    EmptyFile = 1,
+    DirectApiUpload = 2,
+    LargeApiUpload = 3,
+    ManualBrowserOnlyNoKey = 4,
+    ExceedsVirusTotalLimit = 5
+}
+
 public sealed class ScanEngine : IDisposable
 {
     private readonly SettingsStore _settingsStore;
@@ -280,13 +290,132 @@ public sealed class ScanEngine : IDisposable
         return info;
     }
 
-    public void ManualUploadRecord(ScanRecord record)
+    public static ManualUploadStrategy EvaluateManualUpload(long fileSizeBytes, bool fileExists, bool hasApiKey)
+    {
+        if (!fileExists)
+        {
+            return ManualUploadStrategy.FileMissing;
+        }
+
+        if (fileSizeBytes <= 0)
+        {
+            return ManualUploadStrategy.EmptyFile;
+        }
+
+        if (fileSizeBytes > VirusTotalClient.LargeUploadLimitBytes)
+        {
+            return ManualUploadStrategy.ExceedsVirusTotalLimit;
+        }
+
+        if (!hasApiKey)
+        {
+            return ManualUploadStrategy.ManualBrowserOnlyNoKey;
+        }
+
+        return fileSizeBytes > VirusTotalClient.DirectUploadLimitBytes
+            ? ManualUploadStrategy.LargeApiUpload
+            : ManualUploadStrategy.DirectApiUpload;
+    }
+
+    public bool ManualUploadRecord(ScanRecord record)
     {
         ArgumentNullException.ThrowIfNull(record);
-        if (!string.IsNullOrWhiteSpace(record.FilePath))
+        if (_disposed || string.IsNullOrWhiteSpace(record.FilePath))
         {
-            EnqueueFile(record.FilePath, manual: true, forceUpload: true, forceVirusTotal: true);
+            return false;
         }
+
+        string normalizedPath;
+        try
+        {
+            normalizedPath = Path.GetFullPath(record.FilePath);
+        }
+        catch
+        {
+            return false;
+        }
+
+        long fileSize;
+        try
+        {
+            var info = new FileInfo(normalizedPath);
+            if (!info.Exists || info.Length <= 0 || info.Length > VirusTotalClient.LargeUploadLimitBytes)
+            {
+                return false;
+            }
+
+            fileSize = info.Length;
+        }
+        catch
+        {
+            return false;
+        }
+
+        string reason = string.IsNullOrWhiteSpace(record.RiskReason)
+            ? "Manual VirusTotal upload"
+            : record.RiskReason;
+        long boostOrder = Interlocked.Increment(ref _promoteCounter);
+        bool signalNewItem = false;
+
+        lock (_queueSync)
+        {
+            if (_disposed)
+            {
+                return false;
+            }
+
+            if (_activeItem is not null
+                && string.Equals(_activeItem.FilePath, normalizedPath, StringComparison.OrdinalIgnoreCase)
+                && _activeItem.ForceUpload)
+            {
+                return true;
+            }
+
+            QueuedScanItem? existing = _queuedItems.FirstOrDefault(i =>
+                string.Equals(i.FilePath, normalizedPath, StringComparison.OrdinalIgnoreCase));
+
+            if (existing is not null)
+            {
+                existing.FileSizeBytes = fileSize;
+                existing.ManualBoost = true;
+                existing.BoostOrder = boostOrder;
+                existing.ForceUpload = true;
+                existing.ForceVirusTotal = true;
+                existing.Stage = "Prioritized for upload";
+                _queuedItems.Sort(CompareQueueItems);
+            }
+            else
+            {
+                _queuedItems.Add(new QueuedScanItem
+                {
+                    FilePath = normalizedPath,
+                    FileName = Path.GetFileName(normalizedPath),
+                    FileSizeBytes = fileSize,
+                    RiskCategory = record.RiskCategory,
+                    RiskScore = FileRiskClassifier.GetDefaultScore(record.RiskCategory),
+                    RiskReason = reason,
+                    SignerName = record.SignerName,
+                    EnqueuedAtUtc = DateTimeOffset.UtcNow,
+                    State = "Queued",
+                    Stage = "Prioritized for upload",
+                    ManualBoost = true,
+                    BoostOrder = boostOrder,
+                    ForceUpload = true,
+                    ForceVirusTotal = true
+                });
+                _queuedItems.Sort(CompareQueueItems);
+                signalNewItem = true;
+            }
+        }
+
+        if (signalNewItem)
+        {
+            _queueSignal.Release();
+        }
+
+        RaiseQueueChanged();
+        RaiseStatusChanged();
+        return true;
     }
 
     public void RescanOnVirusTotal(ScanRecord record)
@@ -844,7 +973,9 @@ public sealed class ScanEngine : IDisposable
         }
 
         string fileName = Path.GetFileName(item.FilePath);
-        if (settings.MaxHashSizeMb > 0 && fileSize > settings.MaxHashSizeMb * 1024L * 1024L)
+        if (!(item.ForceUpload && fileSize <= VirusTotalClient.LargeUploadLimitBytes)
+            && settings.MaxHashSizeMb > 0
+            && fileSize > settings.MaxHashSizeMb * 1024L * 1024L)
         {
             PublishScanRecord(new ScanRecord
             {

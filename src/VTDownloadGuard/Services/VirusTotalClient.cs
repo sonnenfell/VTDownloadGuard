@@ -40,8 +40,12 @@ public sealed class VirusTotalClient : IDisposable
 {
     private const string ApiBaseUrl = "https://www.virustotal.com/api/v3/";
     private const string EicarSha256 = "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f";
-    private const long DirectUploadLimitBytes = 32L * 1024 * 1024;
-    private const long LargeUploadLimitBytes = 650L * 1024 * 1024;
+    public const long DirectUploadLimitBytes = 32L * 1024 * 1024;
+    public const long LargeUploadLimitBytes = 650L * 1024 * 1024;
+    public const string GuiUploadUrl = "https://www.virustotal.com/gui/home/upload";
+    public const string GuiSearchUrl = "https://www.virustotal.com/gui/home/search";
+    private static readonly TimeSpan DefaultApiRequestTimeout = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan UploadRequestTimeout = TimeSpan.FromMinutes(20);
 
     private readonly HttpClient _httpClient;
     private readonly bool _ownsHttpClient;
@@ -51,6 +55,7 @@ public sealed class VirusTotalClient : IDisposable
     private readonly TimeSpan _analysisPollInterval;
     private readonly TimeSpan _rateLimitFallbackDelay;
     private readonly int _maxPolls;
+    private readonly long _directUploadLimitBytes;
 
     public VirusTotalClient(
         RateLimiter rateLimiter,
@@ -59,16 +64,18 @@ public sealed class VirusTotalClient : IDisposable
         TimeSpan? initialAnalysisDelay = null,
         TimeSpan? analysisPollInterval = null,
         TimeSpan? rateLimitFallbackDelay = null,
-        int maxPolls = 12)
+        int maxPolls = 12,
+        long? directUploadLimitBytes = null)
     {
         _rateLimiter = rateLimiter;
         _logger = logger;
         _ownsHttpClient = httpClient is null;
-        _httpClient = httpClient ?? new HttpClient { Timeout = TimeSpan.FromMinutes(3) };
+        _httpClient = httpClient ?? new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
         _initialAnalysisDelay = initialAnalysisDelay ?? TimeSpan.FromSeconds(20);
         _analysisPollInterval = analysisPollInterval ?? TimeSpan.FromSeconds(25);
         _rateLimitFallbackDelay = rateLimitFallbackDelay ?? TimeSpan.FromSeconds(61);
         _maxPolls = Math.Max(1, maxPolls);
+        _directUploadLimitBytes = Math.Max(1L, directUploadLimitBytes ?? DirectUploadLimitBytes);
     }
 
     public static string BuildGuiFileUrl(string sha256) =>
@@ -330,7 +337,7 @@ public sealed class VirusTotalClient : IDisposable
         }
 
         string uploadEndpoint = ApiBaseUrl + "files";
-        if (length > DirectUploadLimitBytes)
+        if (length > _directUploadLimitBytes)
         {
             onProgress?.Invoke("Requesting large-file upload URL...");
             var (urlResponse, urlError) = await SendWithRateLimitAndRetriesAsync(
@@ -375,9 +382,10 @@ public sealed class VirusTotalClient : IDisposable
         string? analysisId = null;
 
         var (uploadResponse, uploadError) = await SendWithRateLimitAndRetriesAsync(
-            () => CreateMultipartUploadRequest(uploadEndpoint, filePath, apiKey),
+            () => CreateMultipartUploadRequest(uploadEndpoint, filePath, length, apiKey, onProgress),
             () => apiCalls++,
-            ct).ConfigureAwait(false);
+            ct,
+            UploadRequestTimeout).ConfigureAwait(false);
 
         if (uploadError is not null || uploadResponse is null)
         {
@@ -486,9 +494,11 @@ public sealed class VirusTotalClient : IDisposable
     private async Task<(HttpResponseMessage? Response, VtReportResult? ErrorResult)> SendWithRateLimitAndRetriesAsync(
         Func<HttpRequestMessage> requestFactory,
         Action onAttemptSent,
-        CancellationToken ct)
+        CancellationToken ct,
+        TimeSpan? requestTimeout = null)
     {
         const int maxRateLimitRetries = 3;
+        TimeSpan effectiveTimeout = requestTimeout ?? DefaultApiRequestTimeout;
 
         for (int attempt = 0; attempt <= maxRateLimitRetries; attempt++)
         {
@@ -499,11 +509,22 @@ public sealed class VirusTotalClient : IDisposable
             {
                 using HttpRequestMessage request = requestFactory();
                 onAttemptSent();
-                response = await _httpClient.SendAsync(request, ct).ConfigureAwait(false);
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeoutCts.CancelAfter(effectiveTimeout);
+                response = await _httpClient.SendAsync(request, timeoutCts.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 throw;
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.Warn($"HTTP request to VirusTotal timed out after {effectiveTimeout.TotalMinutes:F0} minute(s).");
+                return (null, new VtReportResult
+                {
+                    Outcome = VtOutcome.NetworkError,
+                    ErrorMessage = "Request to VirusTotal timed out."
+                });
             }
             catch (Exception ex)
             {
@@ -587,16 +608,90 @@ public sealed class VirusTotalClient : IDisposable
         return req;
     }
 
-    private static HttpRequestMessage CreateMultipartUploadRequest(string url, string filePath, string apiKey)
+    private static HttpRequestMessage CreateMultipartUploadRequest(
+        string url,
+        string filePath,
+        long fileLength,
+        string apiKey,
+        Action<string>? onProgress)
     {
         var req = CreateRequest(HttpMethod.Post, url, apiKey);
-        var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, useAsync: true);
         var multipart = new MultipartFormDataContent();
-        var streamContent = new StreamContent(stream);
-        streamContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
-        multipart.Add(streamContent, "file", Path.GetFileName(filePath));
+        var fileContent = new ProgressFileContent(filePath, fileLength, onProgress);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+        multipart.Add(fileContent, "file", Path.GetFileName(filePath));
         req.Content = multipart;
         return req;
+    }
+
+    private sealed class ProgressFileContent : HttpContent
+    {
+        private readonly string _filePath;
+        private readonly long _fileLength;
+        private readonly Action<string>? _onProgress;
+
+        public ProgressFileContent(string filePath, long fileLength, Action<string>? onProgress)
+        {
+            _filePath = filePath;
+            _fileLength = Math.Max(0, fileLength);
+            _onProgress = onProgress;
+        }
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = _fileLength;
+            return true;
+        }
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            SerializeToStreamAsync(stream, context, CancellationToken.None);
+
+        protected override async Task SerializeToStreamAsync(
+            Stream stream,
+            TransportContext? context,
+            CancellationToken cancellationToken)
+        {
+            const int bufferSize = 64 * 1024;
+            byte[] buffer = new byte[bufferSize];
+            long totalBytes = _fileLength;
+            long sentBytes = 0;
+            int lastReportedPct = -5;
+            long lastReportTick = Environment.TickCount64 - 1000;
+            double totalMb = totalBytes / (1024.0 * 1024.0);
+
+            await using var fileStream = new FileStream(
+                _filePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize,
+                useAsync: true);
+
+            while (true)
+            {
+                int read = await fileStream.ReadAsync(buffer.AsMemory(0, bufferSize), cancellationToken).ConfigureAwait(false);
+                if (read <= 0)
+                {
+                    break;
+                }
+
+                await stream.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                sentBytes += read;
+
+                if (_onProgress is not null && totalBytes > 0)
+                {
+                    int pct = (int)Math.Clamp(sentBytes * 100L / totalBytes, 0, 100);
+                    long nowTick = Environment.TickCount64;
+                    if (pct - lastReportedPct >= 5 || nowTick - lastReportTick >= 500 || sentBytes >= totalBytes)
+                    {
+                        lastReportedPct = pct;
+                        lastReportTick = nowTick;
+                        double sentMb = sentBytes / (1024.0 * 1024.0);
+                        _onProgress($"Uploading to VirusTotal ({pct}% - {sentMb:F1} / {totalMb:F1} MB)...");
+                    }
+                }
+            }
+        }
     }
 
     private VtReportResult ParseFileReportJson(string json, int apiCalls)
